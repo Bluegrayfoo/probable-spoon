@@ -1,4 +1,4 @@
-om#!/bin/sh
+#!/bin/sh
 set -eu
 
 clang -std=c11 -Wall -Wextra -pedantic \

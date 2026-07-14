@@ -2,6 +2,7 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,10 @@ typedef struct {
     CGPoint origin;
     CGSize size;
 } CGRect;
+
+extern id NSFontAttributeName;
+extern id NSForegroundColorAttributeName;
+extern id NSParagraphStyleAttributeName;
 
 enum {
     NO_VALUE = 0,
@@ -165,6 +170,46 @@ static id alloc_init_frame(const char *class_name, CGRect frame) {
     return ((id (*)(id, SEL, CGRect))objc_msgSend)(
         object, selector("initWithFrame:"), frame
     );
+}
+
+static CGRect view_bounds(id view) {
+    return ((CGRect (*)(id, SEL))objc_msgSend)(view, selector("bounds"));
+}
+
+static void set_view_frame(id view, CGRect frame) {
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(view, selector("setFrame:"), frame);
+}
+
+static void set_double_ivar(id object, const char *name, double value) {
+    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+    if (ivar) {
+        ptrdiff_t offset = ivar_getOffset(ivar);
+        *(double *)((char *)object + offset) = value;
+    }
+}
+
+static double get_double_ivar(id object, const char *name) {
+    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+    if (!ivar) {
+        return 0.0;
+    }
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    return *(double *)((char *)object + offset);
+}
+
+static void set_id_ivar(id object, const char *name, id value) {
+    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+    if (ivar) {
+        object_setIvar(object, ivar, value);
+    }
+}
+
+static id get_id_ivar(id object, const char *name) {
+    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+    if (!ivar) {
+        return NULL;
+    }
+    return object_getIvar(object, ivar);
 }
 
 static id font(double size) {
@@ -404,20 +449,28 @@ static id make_colored_label(
     return field;
 }
 
-static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    id button = alloc_init_frame("NSButton", rect(x, y, width, 54));
-    msg_void_id(button, "setTitle:", ns_string(title));
+static id make_flat_button(
+    const char *title,
+    id target,
+    SEL action,
+    double x,
+    double y,
+    double width,
+    double height
+) {
+    id button = alloc_init_frame("TrideroahFlatButton", rect(x, y, width, height));
     msg_void_id(button, "setTarget:", target);
     ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
+    set_id_ivar(button, "titleText", msg_id(ns_string(title), "copy"));
     return button;
 }
 
+static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
+    return make_flat_button(title, target, action, x, y, width, 54);
+}
+
 static id make_large_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    id button = alloc_init_frame("NSButton", rect(x, y, width, 86));
-    msg_void_id(button, "setTitle:", ns_string(title));
-    msg_void_id(button, "setTarget:", target);
-    ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
-    return button;
+    return make_flat_button(title, target, action, x, y, width, 86);
 }
 
 static void style_card(id view) {
@@ -436,23 +489,15 @@ static void style_page(id view) {
 }
 
 static void style_button_color(id button, double red, double green, double blue) {
-    msg_void_bool(button, "setWantsLayer:", YES_VALUE);
-    msg_void_bool(button, "setBordered:", NO_VALUE);
-    id layer = msg_id(button, "layer");
-    msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(red, green, blue, 1.0));
-    msg_void_double(layer, "setCornerRadius:", 28.0);
-}
-
-static void style_small_button_color(id button, double red, double green, double blue) {
-    msg_void_bool(button, "setWantsLayer:", YES_VALUE);
-    msg_void_bool(button, "setBordered:", NO_VALUE);
-    id layer = msg_id(button, "layer");
-    msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(red, green, blue, 1.0));
-    msg_void_double(layer, "setCornerRadius:", 16.0);
+    set_double_ivar(button, "fillRed", red);
+    set_double_ivar(button, "fillGreen", green);
+    set_double_ivar(button, "fillBlue", blue);
+    msg_void_bool(button, "setNeedsDisplay:", YES_VALUE);
 }
 
 static void style_button_text(id button, id text_color) {
-    msg_void_id(button, "setContentTintColor:", text_color);
+    set_id_ivar(button, "textColor", text_color);
+    msg_void_bool(button, "setNeedsDisplay:", YES_VALUE);
 }
 
 static void render_home(id self);
@@ -480,12 +525,20 @@ static void show_page(id page) {
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
     msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_id(scroll_ref, "setDocumentView:", page);
+    id clip_view = msg_id(scroll_ref, "contentView");
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(clip_view, selector("scrollToPoint:"), (CGPoint){0, 0});
+    msg_void_id(scroll_ref, "reflectScrolledClipView:", clip_view);
 }
 
 static void show_focus_page(id page) {
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", NO_VALUE);
     msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
+    CGRect bounds = view_bounds(scroll_ref);
+    set_view_frame(page, rect(0, 0, bounds.size.width, bounds.size.height));
     msg_void_id(scroll_ref, "setDocumentView:", page);
+    id clip_view = msg_id(scroll_ref, "contentView");
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(clip_view, selector("scrollToPoint:"), (CGPoint){0, 0});
+    msg_void_id(scroll_ref, "reflectScrolledClipView:", clip_view);
 }
 
 static void add_tabs(id root, id self, int active_tab) {
@@ -494,7 +547,7 @@ static void add_tabs(id root, id self, int active_tab) {
 
     for (int i = 0; i < 3; i++) {
         id button = make_button_sized(titles[i], self, selector(actions[i]), 24 + i * 112, 100, 100);
-        style_small_button_color(button, i == active_tab ? 0.70 : 0.08, i == active_tab ? 0.70 : 0.08, i == active_tab ? 0.70 : 0.08);
+        style_button_color(button, i == active_tab ? 0.62 : 0.05, i == active_tab ? 0.62 : 0.05, i == active_tab ? 0.62 : 0.05);
         style_button_text(button, i == active_tab ? color("blackColor") : color("whiteColor"));
         add_subview(root, button);
     }
@@ -608,14 +661,30 @@ static void generate_question(char *prompt, size_t prompt_size) {
 
 static void render_practice_screen(id self) {
     id root = make_page(APP_HEIGHT);
+    CGRect bounds = view_bounds(scroll_ref);
+    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
+    double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
+    set_view_frame(root, rect(0, 0, page_width, page_height));
+
+    double panel_width = 640.0;
+    double panel_height = 500.0;
+    double left = (page_width - panel_width) / 2.0;
+    double top = (page_height - panel_height) / 2.0;
+    if (left < 24.0) {
+        left = 24.0;
+    }
+    if (top < 80.0) {
+        top = 80.0;
+    }
+
     char prompt_text[256];
     generate_question(prompt_text, sizeof(prompt_text));
 
     id prompt = make_label(
         prompt_text,
-        620,
-        535,
-        760,
+        left,
+        top,
+        panel_width,
         34,
         22
     );
@@ -623,7 +692,7 @@ static void render_practice_screen(id self) {
     msg_void_int(prompt, "setAlignment:", NSTextAlignmentCenter);
     add_subview(root, prompt);
 
-    id image_box = alloc_init_frame("FlippedTrideroahView", rect(650, 615, 230, 230));
+    id image_box = alloc_init_frame("FlippedTrideroahView", rect(left, top + 90, 230, 230));
     msg_void_bool(image_box, "setWantsLayer:", YES_VALUE);
     id image_layer = msg_id(image_box, "layer");
     msg_void_ptr(image_layer, "setBackgroundColor:", rgb_cg_color(0.0, 0.0, 0.0, 1.0));
@@ -644,7 +713,7 @@ static void render_practice_screen(id self) {
         add_subview(image_box, token_label);
     }
 
-    practice_answer = alloc_init_frame("NSTextField", rect(950, 665, 320, 72));
+    practice_answer = alloc_init_frame("NSTextField", rect(left + 310, top + 135, 330, 72));
     msg_void_id(
         practice_answer,
         "setPlaceholderString:",
@@ -667,17 +736,17 @@ static void render_practice_screen(id self) {
     );
     add_subview(root, practice_answer);
 
-    id check_button = make_large_button_sized("Check", self, selector("checkPractice:"), 640, 905, 310);
+    id check_button = make_large_button_sized("Check", self, selector("checkPractice:"), left, top + 360, 310);
     style_button_color(check_button, 0.0, 1.0, 0.0);
     style_button_text(check_button, color("blackColor"));
     add_subview(root, check_button);
 
-    id dont_button = make_large_button_sized("Don't know", self, selector("dontKnow:"), 970, 905, 310);
+    id dont_button = make_large_button_sized("Don't know", self, selector("dontKnow:"), left + 330, top + 360, 310);
     style_button_color(dont_button, 1.0, 0.12, 0.02);
     style_button_text(dont_button, color("whiteColor"));
     add_subview(root, dont_button);
 
-    id exit_button = make_large_button_sized("Save and exit", self, selector("endPractice:"), 640, 1010, 640);
+    id exit_button = make_large_button_sized("Save and exit", self, selector("endPractice:"), left, top + 455, 640);
     style_button_color(exit_button, 0.05, 0.2, 1.0);
     style_button_text(exit_button, color("whiteColor"));
     add_subview(root, exit_button);
@@ -689,40 +758,56 @@ static void render_practice_screen(id self) {
 
 static void render_result_screen(id self, int correct) {
     id root = make_page(APP_HEIGHT);
+    CGRect bounds = view_bounds(scroll_ref);
+    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
+    double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
+    set_view_frame(root, rect(0, 0, page_width, page_height));
+
+    double panel_width = 360.0;
+    double panel_height = correct ? 400.0 : 560.0;
+    double left = (page_width - panel_width) / 2.0;
+    double top = (page_height - panel_height) / 2.0;
+    if (left < 24.0) {
+        left = 24.0;
+    }
+    if (top < 80.0) {
+        top = 80.0;
+    }
+
     const char *status = correct ? "Correct" : "Incorrect";
-    id status_label = make_label(status, 840, 390, 380, 60, 34);
+    id status_label = make_label(status, left - 10, top, 380, 60, 34);
     msg_void_id(status_label, "setTextColor:", correct ? color("systemGreenColor") : color("systemRedColor"));
     msg_void_int(status_label, "setAlignment:", NSTextAlignmentCenter);
     add_subview(root, status_label);
 
     if (!correct) {
-        id yours = make_label("Your answer:", 855, 485, 260, 32, 20);
+        id yours = make_label("Your answer:", left + 50, top + 95, 260, 32, 20);
         msg_void_id(yours, "setTextColor:", color("whiteColor"));
         msg_void_int(yours, "setAlignment:", NSTextAlignmentCenter);
         add_subview(root, yours);
 
-        id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", 845, 535, 280, 42, 20);
+        id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", left + 40, top + 145, 280, 42, 20);
         msg_void_id(answer_box, "setTextColor:", rgb_color(0.65, 0.65, 0.65, 1.0));
         msg_void_int(answer_box, "setAlignment:", NSTextAlignmentCenter);
         add_subview(root, answer_box);
 
-        id correct_title = make_label("Correct:", 885, 605, 200, 34, 20);
+        id correct_title = make_label("Correct:", left + 80, top + 215, 200, 34, 20);
         msg_void_id(correct_title, "setTextColor:", color("whiteColor"));
         msg_void_int(correct_title, "setAlignment:", NSTextAlignmentCenter);
         add_subview(root, correct_title);
     }
 
-    id correct_answer = make_label(last_correct_answer, 820, correct ? 500 : 660, 360, 40, 24);
+    id correct_answer = make_label(last_correct_answer, left, top + (correct ? 110 : 270), 360, 40, 24);
     msg_void_id(correct_answer, "setTextColor:", color("systemGreenColor"));
     msg_void_int(correct_answer, "setAlignment:", NSTextAlignmentCenter);
     add_subview(root, correct_answer);
 
-    id next_button = make_large_button_sized("Next ->", self, selector("nextPractice:"), 800, correct ? 600 : 730, 330);
+    id next_button = make_large_button_sized("Next ->", self, selector("nextPractice:"), left + 15, top + (correct ? 210 : 350), 330);
     style_button_color(next_button, 0.0, 1.0, 0.0);
     style_button_text(next_button, color("blackColor"));
     add_subview(root, next_button);
 
-    id exit_button = make_large_button_sized("Exit", self, selector("endPractice:"), 800, correct ? 700 : 835, 330);
+    id exit_button = make_large_button_sized("Exit", self, selector("endPractice:"), left + 15, top + (correct ? 310 : 455), 330);
     style_button_color(exit_button, 0.05, 0.2, 1.0);
     style_button_text(exit_button, color("whiteColor"));
     add_subview(root, exit_button);
@@ -731,12 +816,26 @@ static void render_result_screen(id self, int correct) {
 
 static void render_finished_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    id label = make_label("Good Job!\nSee you\nnext time!", 800, 320, 440, 170, 34);
+    CGRect bounds = view_bounds(scroll_ref);
+    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
+    double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
+    set_view_frame(root, rect(0, 0, page_width, page_height));
+
+    double left = (page_width - 440.0) / 2.0;
+    double top = (page_height - 400.0) / 2.0;
+    if (left < 24.0) {
+        left = 24.0;
+    }
+    if (top < 80.0) {
+        top = 80.0;
+    }
+
+    id label = make_label("Good Job!\nSee you\nnext time!", left, top, 440, 170, 34);
     msg_void_id(label, "setTextColor:", color("systemGreenColor"));
     msg_void_int(label, "setAlignment:", NSTextAlignmentCenter);
     add_subview(root, label);
 
-    id home_button = make_large_button_sized("Go home", self, selector("showHome:"), 820, 650, 360);
+    id home_button = make_large_button_sized("Go home", self, selector("showHome:"), left + 40, top + 260, 360);
     style_button_color(home_button, 0.0, 1.0, 0.0);
     style_button_text(home_button, color("blackColor"));
     add_subview(root, home_button);
@@ -897,7 +996,7 @@ static void render_home(id self) {
     msg_void_id(letter_desc, "setTextColor:", color("secondaryLabelColor"));
     add_subview(letter_card, letter_desc);
     id letter_button = make_button_sized("Go", self, selector("startLetters:"), 260, 96, 140);
-    style_small_button_color(letter_button, 0.05, 0.2, 1.0);
+    style_button_color(letter_button, 0.05, 0.2, 1.0);
     style_button_text(letter_button, color("whiteColor"));
     add_subview(letter_card, letter_button);
 
@@ -914,10 +1013,10 @@ static void render_home(id self) {
     id short_button = make_button_sized("Short", self, selector("startWordsShort:"), 106, 106, 86);
     id medium_button = make_button_sized("Medium", self, selector("startWordsMedium:"), 202, 106, 98);
     id long_button = make_button_sized("Long", self, selector("startWordsLong:"), 310, 106, 84);
-    style_small_button_color(any_button, 0.05, 0.2, 1.0);
-    style_small_button_color(short_button, 0.05, 0.2, 1.0);
-    style_small_button_color(medium_button, 0.05, 0.2, 1.0);
-    style_small_button_color(long_button, 0.05, 0.2, 1.0);
+    style_button_color(any_button, 0.05, 0.2, 1.0);
+    style_button_color(short_button, 0.05, 0.2, 1.0);
+    style_button_color(medium_button, 0.05, 0.2, 1.0);
+    style_button_color(long_button, 0.05, 0.2, 1.0);
     style_button_text(any_button, color("whiteColor"));
     style_button_text(short_button, color("whiteColor"));
     style_button_text(medium_button, color("whiteColor"));
@@ -975,6 +1074,78 @@ static void fill_oval(double x, double y, double width, double height) {
         rect(x, y, width, height)
     );
     msg_void(oval, "fill");
+}
+
+static void draw_flat_button(id self, SEL _cmd, CGRect dirty_rect) {
+    (void)_cmd;
+    (void)dirty_rect;
+
+    CGRect bounds = view_bounds(self);
+    double red = get_double_ivar(self, "fillRed");
+    double green = get_double_ivar(self, "fillGreen");
+    double blue = get_double_ivar(self, "fillBlue");
+    msg_void(rgb_color(red, green, blue, 1.0), "set");
+
+    double radius = bounds.size.height > 70.0 ? 20.0 : 16.0;
+    id background = ((id (*)(id, SEL, CGRect, double, double))objc_msgSend)(
+        cls("NSBezierPath"),
+        selector("bezierPathWithRoundedRect:xRadius:yRadius:"),
+        rect(0, 0, bounds.size.width, bounds.size.height),
+        radius,
+        radius
+    );
+    msg_void(background, "fill");
+
+    id title = get_id_ivar(self, "titleText");
+    if (!title) {
+        return;
+    }
+    id text_color = get_id_ivar(self, "textColor");
+    if (!text_color) {
+        text_color = color("whiteColor");
+    }
+
+    id paragraph = msg_id(cls("NSMutableParagraphStyle"), "alloc");
+    paragraph = msg_id(paragraph, "init");
+    msg_void_int(paragraph, "setAlignment:", NSTextAlignmentCenter);
+
+    id keys[3] = {NSFontAttributeName, NSForegroundColorAttributeName, NSParagraphStyleAttributeName};
+    id values[3] = {font(bounds.size.height > 70.0 ? 18.0 : 14.0), text_color, paragraph};
+    id attributes = ((id (*)(id, SEL, id *, id *, unsigned long))objc_msgSend)(
+        cls("NSDictionary"),
+        selector("dictionaryWithObjects:forKeys:count:"),
+        values,
+        keys,
+        3
+    );
+
+    CGSize text_size = ((CGSize (*)(id, SEL, id))objc_msgSend)(
+        title,
+        selector("sizeWithAttributes:"),
+        attributes
+    );
+    double text_y = (bounds.size.height - text_size.height) / 2.0;
+    ((void (*)(id, SEL, CGRect, id))objc_msgSend)(
+        title,
+        selector("drawInRect:withAttributes:"),
+        rect(0, text_y, bounds.size.width, text_size.height + 4.0),
+        attributes
+    );
+}
+
+static void flat_button_mouse_down(id self, SEL _cmd, id event) {
+    (void)_cmd;
+    (void)event;
+    SEL action = ((SEL (*)(id, SEL))objc_msgSend)(self, selector("action"));
+    id target = msg_id(self, "target");
+    id app = msg_id(cls("NSApplication"), "sharedApplication");
+    ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
+        app,
+        selector("sendAction:to:from:"),
+        action,
+        target,
+        self
+    );
 }
 
 static double graph_width_for_count(int count) {
@@ -1399,6 +1570,23 @@ static Class make_flipped_view_class(void) {
     return objc_getClass("FlippedTrideroahView");
 }
 
+static Class make_flat_button_class(void) {
+    Class superclass = objc_getClass("NSControl");
+    Class button_class = objc_allocateClassPair(superclass, "TrideroahFlatButton", 0);
+    if (button_class) {
+        class_addIvar(button_class, "fillRed", sizeof(double), 3, "d");
+        class_addIvar(button_class, "fillGreen", sizeof(double), 3, "d");
+        class_addIvar(button_class, "fillBlue", sizeof(double), 3, "d");
+        class_addIvar(button_class, "titleText", sizeof(id), 3, "@");
+        class_addIvar(button_class, "textColor", sizeof(id), 3, "@");
+        class_addMethod(button_class, selector("isFlipped"), (IMP)should_terminate_after_last_window_closed, "c@:");
+        class_addMethod(button_class, selector("drawRect:"), (IMP)draw_flat_button, "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
+        class_addMethod(button_class, selector("mouseDown:"), (IMP)flat_button_mouse_down, "v@:@");
+        objc_registerClassPair(button_class);
+    }
+    return objc_getClass("TrideroahFlatButton");
+}
+
 static void make_graph_view_classes(void) {
     Class superclass = objc_getClass("NSView");
     Class letter_class = objc_allocateClassPair(superclass, "TrideroahLetterGraphView", 0);
@@ -1452,6 +1640,7 @@ static Class make_delegate_class(void) {
 static void launch_learn_app(void) {
     srand((unsigned int)time(NULL));
     make_flipped_view_class();
+    make_flat_button_class();
     make_graph_view_classes();
     Class delegate_class = make_delegate_class();
 
