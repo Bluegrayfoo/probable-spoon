@@ -102,6 +102,14 @@ static void msg_void_int(id receiver, const char *name, int arg) {
     ((void (*)(id, SEL, int))objc_msgSend)(receiver, selector(name), arg);
 }
 
+static void msg_void_double(id receiver, const char *name, double arg) {
+    ((void (*)(id, SEL, double))objc_msgSend)(receiver, selector(name), arg);
+}
+
+static void msg_void_ptr(id receiver, const char *name, const void *arg) {
+    ((void (*)(id, SEL, const void *))objc_msgSend)(receiver, selector(name), arg);
+}
+
 static id ns_string(const char *text) {
     return ((id (*)(id, SEL, const char *))objc_msgSend)(
         cls("NSString"), selector("stringWithUTF8String:"), text
@@ -127,6 +135,10 @@ static id font(double size) {
 
 static id color(const char *name) {
     return msg_id(cls("NSColor"), name);
+}
+
+static const void *cg_color(const char *name) {
+    return ((const void *(*)(id, SEL))objc_msgSend)(color(name), selector("CGColor"));
 }
 
 static void add_subview(id parent, id child) {
@@ -211,6 +223,15 @@ static id make_button(const char *title, id target, SEL action, double x, double
     return button;
 }
 
+static void style_card(id view) {
+    msg_void_bool(view, "setWantsLayer:", YES_VALUE);
+    id layer = msg_id(view, "layer");
+    msg_void_ptr(layer, "setBackgroundColor:", cg_color("controlBackgroundColor"));
+    msg_void_ptr(layer, "setBorderColor:", cg_color("separatorColor"));
+    msg_void_double(layer, "setBorderWidth:", 1.0);
+    msg_void_double(layer, "setCornerRadius:", 8.0);
+}
+
 static void set_image_for_current_practice(void) {
     msg_void_id(practice_image, "setImage:", image_for_letter(letter_map[current_index].letter));
 }
@@ -275,8 +296,8 @@ static void check_practice(id self, SEL _cmd, id sender) {
 }
 
 static id make_alphabet_tile(const char *letter, const char *token, double x, double y) {
-    id box = alloc_init_frame("NSBox", rect(x, y, 140, 120));
-    msg_void_id(box, "setTitle:", ns_string(""));
+    id box = alloc_init_frame("FlippedTrideroahView", rect(x, y, 140, 120));
+    style_card(box);
 
     id image_view = alloc_init_frame("NSImageView", rect(24, 12, 92, 70));
     msg_void_id(image_view, "setImage:", image_for_letter(letter));
@@ -335,8 +356,8 @@ static void build_window(id self) {
     id practice_heading = make_label("Practice", 24, 106, 200, 28, 20);
     add_subview(root, practice_heading);
 
-    id practice_box = alloc_init_frame("NSBox", rect(24, 144, 920, 138));
-    msg_void_id(practice_box, "setTitle:", ns_string(""));
+    id practice_box = alloc_init_frame("FlippedTrideroahView", rect(24, 144, 920, 138));
+    style_card(practice_box);
     add_subview(root, practice_box);
 
     practice_image = alloc_init_frame("NSImageView", rect(20, 20, 96, 96));
