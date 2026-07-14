@@ -1,10 +1,16 @@
 #include <ctype.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 typedef struct {
     double x;
@@ -43,8 +49,9 @@ typedef struct {
     const char *token;
 } LetterMap;
 
-static const char *asset_root =
+static const char *fallback_asset_root =
     "/Users/tristan/Desktop/skill building/technical/coding/Tristan/Apps/Translation/Translation/Assets.xcassets";
+static char asset_root[PATH_MAX];
 
 static const LetterMap letter_map[] = {
     {"a", "li"}, {"b", "no"}, {"c", "kr"}, {"d", "ku"}, {"e", "in"},
@@ -128,6 +135,48 @@ static void add_subview(id parent, id child) {
 
 static void set_string(id field, const char *text) {
     msg_void_id(field, "setStringValue:", ns_string(text));
+}
+
+static int directory_exists(const char *path) {
+    return access(path, R_OK | X_OK) == 0;
+}
+
+static void use_asset_root_if_found(const char *path, int *found) {
+    if (!*found && path && directory_exists(path)) {
+        snprintf(asset_root, sizeof(asset_root), "%s", path);
+        *found = 1;
+    }
+}
+
+static void resolve_asset_root(const char *program_path) {
+    int found = 0;
+    const char *env_assets = getenv("TRIDEROAH_ASSETS");
+    use_asset_root_if_found(env_assets, &found);
+    use_asset_root_if_found("Assets.xcassets", &found);
+    use_asset_root_if_found("assets/Assets.xcassets", &found);
+
+    if (!found && program_path) {
+        const char *slash = strrchr(program_path, '/');
+        if (slash) {
+            char program_dir[PATH_MAX];
+            size_t dir_len = (size_t)(slash - program_path);
+            if (dir_len >= sizeof(program_dir)) {
+                dir_len = sizeof(program_dir) - 1;
+            }
+            memcpy(program_dir, program_path, dir_len);
+            program_dir[dir_len] = '\0';
+
+            char candidate[PATH_MAX];
+            snprintf(candidate, sizeof(candidate), "%s/Assets.xcassets", program_dir);
+            use_asset_root_if_found(candidate, &found);
+            snprintf(candidate, sizeof(candidate), "%s/assets/Assets.xcassets", program_dir);
+            use_asset_root_if_found(candidate, &found);
+        }
+    }
+
+    if (!found) {
+        snprintf(asset_root, sizeof(asset_root), "%s", fallback_asset_root);
+    }
 }
 
 static void image_path(const char *letter, char *buffer, size_t size) {
@@ -406,6 +455,7 @@ static void print_usage(void) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "learn") == 0) {
+        resolve_asset_root(argv[0]);
         launch_learn_app();
         return 0;
     }
