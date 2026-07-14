@@ -2,7 +2,6 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <limits.h>
-#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,10 +26,6 @@ typedef struct {
     CGPoint origin;
     CGSize size;
 } CGRect;
-
-extern id NSFontAttributeName;
-extern id NSForegroundColorAttributeName;
-extern id NSParagraphStyleAttributeName;
 
 enum {
     NO_VALUE = 0,
@@ -178,38 +173,6 @@ static CGRect view_bounds(id view) {
 
 static void set_view_frame(id view, CGRect frame) {
     ((void (*)(id, SEL, CGRect))objc_msgSend)(view, selector("setFrame:"), frame);
-}
-
-static void set_double_ivar(id object, const char *name, double value) {
-    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
-    if (ivar) {
-        ptrdiff_t offset = ivar_getOffset(ivar);
-        *(double *)((char *)object + offset) = value;
-    }
-}
-
-static double get_double_ivar(id object, const char *name) {
-    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
-    if (!ivar) {
-        return 0.0;
-    }
-    ptrdiff_t offset = ivar_getOffset(ivar);
-    return *(double *)((char *)object + offset);
-}
-
-static void set_id_ivar(id object, const char *name, id value) {
-    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
-    if (ivar) {
-        object_setIvar(object, ivar, value);
-    }
-}
-
-static id get_id_ivar(id object, const char *name) {
-    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
-    if (!ivar) {
-        return NULL;
-    }
-    return object_getIvar(object, ivar);
 }
 
 static id font(double size) {
@@ -449,28 +412,20 @@ static id make_colored_label(
     return field;
 }
 
-static id make_flat_button(
-    const char *title,
-    id target,
-    SEL action,
-    double x,
-    double y,
-    double width,
-    double height
-) {
-    id button = alloc_init_frame("TrideroahFlatButton", rect(x, y, width, height));
+static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
+    id button = alloc_init_frame("NSButton", rect(x, y, width, 54));
+    msg_void_id(button, "setTitle:", ns_string(title));
     msg_void_id(button, "setTarget:", target);
     ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
-    set_id_ivar(button, "titleText", msg_id(ns_string(title), "copy"));
     return button;
 }
 
-static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    return make_flat_button(title, target, action, x, y, width, 54);
-}
-
 static id make_large_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    return make_flat_button(title, target, action, x, y, width, 86);
+    id button = alloc_init_frame("NSButton", rect(x, y, width, 54));
+    msg_void_id(button, "setTitle:", ns_string(title));
+    msg_void_id(button, "setTarget:", target);
+    ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
+    return button;
 }
 
 static void style_card(id view) {
@@ -489,15 +444,15 @@ static void style_page(id view) {
 }
 
 static void style_button_color(id button, double red, double green, double blue) {
-    set_double_ivar(button, "fillRed", red);
-    set_double_ivar(button, "fillGreen", green);
-    set_double_ivar(button, "fillBlue", blue);
-    msg_void_bool(button, "setNeedsDisplay:", YES_VALUE);
+    msg_void_bool(button, "setWantsLayer:", YES_VALUE);
+    msg_void_bool(button, "setBordered:", NO_VALUE);
+    id layer = msg_id(button, "layer");
+    msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(red, green, blue, 1.0));
+    msg_void_double(layer, "setCornerRadius:", 16.0);
 }
 
 static void style_button_text(id button, id text_color) {
-    set_id_ivar(button, "textColor", text_color);
-    msg_void_bool(button, "setNeedsDisplay:", YES_VALUE);
+    msg_void_id(button, "setContentTintColor:", text_color);
 }
 
 static void render_home(id self);
@@ -525,9 +480,6 @@ static void show_page(id page) {
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
     msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_id(scroll_ref, "setDocumentView:", page);
-    id clip_view = msg_id(scroll_ref, "contentView");
-    ((void (*)(id, SEL, CGPoint))objc_msgSend)(clip_view, selector("scrollToPoint:"), (CGPoint){0, 0});
-    msg_void_id(scroll_ref, "reflectScrolledClipView:", clip_view);
 }
 
 static void show_focus_page(id page) {
@@ -536,9 +488,6 @@ static void show_focus_page(id page) {
     CGRect bounds = view_bounds(scroll_ref);
     set_view_frame(page, rect(0, 0, bounds.size.width, bounds.size.height));
     msg_void_id(scroll_ref, "setDocumentView:", page);
-    id clip_view = msg_id(scroll_ref, "contentView");
-    ((void (*)(id, SEL, CGPoint))objc_msgSend)(clip_view, selector("scrollToPoint:"), (CGPoint){0, 0});
-    msg_void_id(scroll_ref, "reflectScrolledClipView:", clip_view);
 }
 
 static void add_tabs(id root, id self, int active_tab) {
@@ -1076,78 +1025,6 @@ static void fill_oval(double x, double y, double width, double height) {
     msg_void(oval, "fill");
 }
 
-static void draw_flat_button(id self, SEL _cmd, CGRect dirty_rect) {
-    (void)_cmd;
-    (void)dirty_rect;
-
-    CGRect bounds = view_bounds(self);
-    double red = get_double_ivar(self, "fillRed");
-    double green = get_double_ivar(self, "fillGreen");
-    double blue = get_double_ivar(self, "fillBlue");
-    msg_void(rgb_color(red, green, blue, 1.0), "set");
-
-    double radius = bounds.size.height > 70.0 ? 20.0 : 16.0;
-    id background = ((id (*)(id, SEL, CGRect, double, double))objc_msgSend)(
-        cls("NSBezierPath"),
-        selector("bezierPathWithRoundedRect:xRadius:yRadius:"),
-        rect(0, 0, bounds.size.width, bounds.size.height),
-        radius,
-        radius
-    );
-    msg_void(background, "fill");
-
-    id title = get_id_ivar(self, "titleText");
-    if (!title) {
-        return;
-    }
-    id text_color = get_id_ivar(self, "textColor");
-    if (!text_color) {
-        text_color = color("whiteColor");
-    }
-
-    id paragraph = msg_id(cls("NSMutableParagraphStyle"), "alloc");
-    paragraph = msg_id(paragraph, "init");
-    msg_void_int(paragraph, "setAlignment:", NSTextAlignmentCenter);
-
-    id keys[3] = {NSFontAttributeName, NSForegroundColorAttributeName, NSParagraphStyleAttributeName};
-    id values[3] = {font(bounds.size.height > 70.0 ? 18.0 : 14.0), text_color, paragraph};
-    id attributes = ((id (*)(id, SEL, id *, id *, unsigned long))objc_msgSend)(
-        cls("NSDictionary"),
-        selector("dictionaryWithObjects:forKeys:count:"),
-        values,
-        keys,
-        3
-    );
-
-    CGSize text_size = ((CGSize (*)(id, SEL, id))objc_msgSend)(
-        title,
-        selector("sizeWithAttributes:"),
-        attributes
-    );
-    double text_y = (bounds.size.height - text_size.height) / 2.0;
-    ((void (*)(id, SEL, CGRect, id))objc_msgSend)(
-        title,
-        selector("drawInRect:withAttributes:"),
-        rect(0, text_y, bounds.size.width, text_size.height + 4.0),
-        attributes
-    );
-}
-
-static void flat_button_mouse_down(id self, SEL _cmd, id event) {
-    (void)_cmd;
-    (void)event;
-    SEL action = ((SEL (*)(id, SEL))objc_msgSend)(self, selector("action"));
-    id target = msg_id(self, "target");
-    id app = msg_id(cls("NSApplication"), "sharedApplication");
-    ((BOOL (*)(id, SEL, SEL, id, id))objc_msgSend)(
-        app,
-        selector("sendAction:to:from:"),
-        action,
-        target,
-        self
-    );
-}
-
 static double graph_width_for_count(int count) {
     double width = 760.0;
     double expanded = 180.0 + (double)(count > 1 ? count : 1) * 90.0;
@@ -1570,23 +1447,6 @@ static Class make_flipped_view_class(void) {
     return objc_getClass("FlippedTrideroahView");
 }
 
-static Class make_flat_button_class(void) {
-    Class superclass = objc_getClass("NSControl");
-    Class button_class = objc_allocateClassPair(superclass, "TrideroahFlatButton", 0);
-    if (button_class) {
-        class_addIvar(button_class, "fillRed", sizeof(double), 3, "d");
-        class_addIvar(button_class, "fillGreen", sizeof(double), 3, "d");
-        class_addIvar(button_class, "fillBlue", sizeof(double), 3, "d");
-        class_addIvar(button_class, "titleText", sizeof(id), 3, "@");
-        class_addIvar(button_class, "textColor", sizeof(id), 3, "@");
-        class_addMethod(button_class, selector("isFlipped"), (IMP)should_terminate_after_last_window_closed, "c@:");
-        class_addMethod(button_class, selector("drawRect:"), (IMP)draw_flat_button, "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
-        class_addMethod(button_class, selector("mouseDown:"), (IMP)flat_button_mouse_down, "v@:@");
-        objc_registerClassPair(button_class);
-    }
-    return objc_getClass("TrideroahFlatButton");
-}
-
 static void make_graph_view_classes(void) {
     Class superclass = objc_getClass("NSView");
     Class letter_class = objc_allocateClassPair(superclass, "TrideroahLetterGraphView", 0);
@@ -1640,7 +1500,6 @@ static Class make_delegate_class(void) {
 static void launch_learn_app(void) {
     srand((unsigned int)time(NULL));
     make_flipped_view_class();
-    make_flat_button_class();
     make_graph_view_classes();
     Class delegate_class = make_delegate_class();
 
