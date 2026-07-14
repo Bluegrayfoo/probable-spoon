@@ -172,6 +172,18 @@ static CGRect view_bounds(id view) {
     return ((CGRect (*)(id, SEL))objc_msgSend)(view, selector("bounds"));
 }
 
+static void scroll_clip_to_origin(void) {
+    id content_view = msg_id(scroll_ref, "contentView");
+    if (content_view) {
+        ((void (*)(id, SEL, CGPoint))objc_msgSend)(
+            content_view,
+            selector("scrollToPoint:"),
+            (CGPoint){0.0, 0.0}
+        );
+        msg_void_id(scroll_ref, "reflectScrolledClipView:", content_view);
+    }
+}
+
 static CGRect scroll_visible_bounds(void) {
     id content_view = msg_id(scroll_ref, "contentView");
     if (content_view) {
@@ -490,14 +502,15 @@ static void show_page(id page) {
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
     msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_id(scroll_ref, "setDocumentView:", page);
+    scroll_clip_to_origin();
 }
 
 static void show_focus_page(id page) {
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", NO_VALUE);
     msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
-    CGRect bounds = scroll_visible_bounds();
-    set_view_frame(page, rect(0, 0, bounds.size.width, bounds.size.height));
+    set_view_frame(page, rect(0, 0, APP_WIDTH, APP_HEIGHT));
     msg_void_id(scroll_ref, "setDocumentView:", page);
+    scroll_clip_to_origin();
 }
 
 static void add_tabs(id root, id self, int active_tab) {
@@ -620,9 +633,8 @@ static void generate_question(char *prompt, size_t prompt_size) {
 
 static void render_practice_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    CGRect bounds = scroll_visible_bounds();
-    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
-    double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
+    double page_width = APP_WIDTH;
+    double page_height = APP_HEIGHT;
     set_view_frame(root, rect(0, 0, page_width, page_height));
 
     double panel_width = 640.0;
@@ -717,9 +729,8 @@ static void render_practice_screen(id self) {
 
 static void render_result_screen(id self, int correct) {
     id root = make_page(APP_HEIGHT);
-    CGRect bounds = scroll_visible_bounds();
-    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
-    double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
+    double page_width = APP_WIDTH;
+    double page_height = APP_HEIGHT;
     set_view_frame(root, rect(0, 0, page_width, page_height));
 
     double panel_width = 360.0;
@@ -775,9 +786,8 @@ static void render_result_screen(id self, int correct) {
 
 static void render_finished_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    CGRect bounds = scroll_visible_bounds();
-    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
-    double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
+    double page_width = APP_WIDTH;
+    double page_height = APP_HEIGHT;
     set_view_frame(root, rect(0, 0, page_width, page_height));
 
     double left = (page_width - 440.0) / 2.0;
