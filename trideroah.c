@@ -172,6 +172,14 @@ static CGRect view_bounds(id view) {
     return ((CGRect (*)(id, SEL))objc_msgSend)(view, selector("bounds"));
 }
 
+static CGRect scroll_visible_bounds(void) {
+    id content_view = msg_id(scroll_ref, "contentView");
+    if (content_view) {
+        return view_bounds(content_view);
+    }
+    return view_bounds(scroll_ref);
+}
+
 static void set_view_frame(id view, CGRect frame) {
     ((void (*)(id, SEL, CGRect))objc_msgSend)(view, selector("setFrame:"), frame);
 }
@@ -487,7 +495,7 @@ static void show_page(id page) {
 static void show_focus_page(id page) {
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", NO_VALUE);
     msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
-    CGRect bounds = view_bounds(scroll_ref);
+    CGRect bounds = scroll_visible_bounds();
     set_view_frame(page, rect(0, 0, bounds.size.width, bounds.size.height));
     msg_void_id(scroll_ref, "setDocumentView:", page);
 }
@@ -612,7 +620,7 @@ static void generate_question(char *prompt, size_t prompt_size) {
 
 static void render_practice_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    CGRect bounds = view_bounds(scroll_ref);
+    CGRect bounds = scroll_visible_bounds();
     double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
     double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
     set_view_frame(root, rect(0, 0, page_width, page_height));
@@ -709,7 +717,7 @@ static void render_practice_screen(id self) {
 
 static void render_result_screen(id self, int correct) {
     id root = make_page(APP_HEIGHT);
-    CGRect bounds = view_bounds(scroll_ref);
+    CGRect bounds = scroll_visible_bounds();
     double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
     double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
     set_view_frame(root, rect(0, 0, page_width, page_height));
@@ -767,7 +775,7 @@ static void render_result_screen(id self, int correct) {
 
 static void render_finished_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    CGRect bounds = view_bounds(scroll_ref);
+    CGRect bounds = scroll_visible_bounds();
     double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
     double page_height = bounds.size.height > 1.0 ? bounds.size.height : APP_HEIGHT;
     set_view_frame(root, rect(0, 0, page_width, page_height));
@@ -931,7 +939,7 @@ static void add_alphabet_grid(id root, double start_y) {
 
 static void render_home(id self) {
     id root = make_page(820);
-    CGRect bounds = view_bounds(scroll_ref);
+    CGRect bounds = scroll_visible_bounds();
     double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
     set_view_frame(root, rect(0, 0, page_width, 820));
     add_header(root, self, 0);
@@ -939,10 +947,7 @@ static void render_home(id self) {
     double card_width = 430.0;
     double card_height = 164.0;
     double card_gap = 36.0;
-    double content_left = (page_width - ((card_width * 2.0) + card_gap)) / 2.0;
-    if (content_left < 24.0) {
-        content_left = 24.0;
-    }
+    double content_left = 24.0;
 
     id heading = make_label("Home", content_left, 154, 300, 28, 20);
     msg_void_id(heading, "setTextColor:", color("whiteColor"));
