@@ -41,7 +41,7 @@ enum {
     NSBackingStoreBuffered = 2,
     NSApplicationActivationPolicyRegular = 0,
     NSImageScaleProportionallyUpOrDown = 3,
-    NSTextAlignmentCenter = 2,
+    NSTextAlignmentCenter = 1,
     NSFocusRingTypeDefault = 0,
     NSViewWidthSizable = 1 << 1,
     NSViewHeightSizable = 1 << 4,
@@ -68,6 +68,7 @@ typedef enum {
 #define WORD_BASE_SUITABLE_SECONDS 1.5
 #define WORD_SECONDS_PER_LETTER 0.75
 #define MAX_WORD_LENGTH 12
+#define PRACTICE_SESSION_LIMIT 10
 
 static const char *fallback_asset_root =
     "/Users/tristan/Desktop/skill building/technical/coding/Tristan/Apps/Translation/Translation/Assets.xcassets";
@@ -106,6 +107,7 @@ static char word_labels[MAX_RESULTS][MAX_WORD_LENGTH + 1];
 static int letter_time_count = 0;
 static int word_time_count = 0;
 static int awaiting_answer = 0;
+static int session_answer_count = 0;
 static char last_user_answer[128];
 static char last_correct_answer[128];
 static int last_answer_correct = 0;
@@ -168,8 +170,17 @@ static id alloc_init_frame(const char *class_name, CGRect frame) {
     );
 }
 
-static CGRect view_bounds(id view) {
-    return ((CGRect (*)(id, SEL))objc_msgSend)(view, selector("bounds"));
+static CGRect window_content_rect(void) {
+    if (window_ref) {
+        CGRect content_rect = ((CGRect (*)(id, SEL))objc_msgSend)(
+            window_ref,
+            selector("contentLayoutRect")
+        );
+        if (content_rect.size.width > 1.0 && content_rect.size.height > 1.0) {
+            return rect(0, 0, content_rect.size.width, content_rect.size.height);
+        }
+    }
+    return rect(0, 0, APP_WIDTH, APP_HEIGHT);
 }
 
 static void scroll_clip_to_origin(void) {
@@ -184,12 +195,23 @@ static void scroll_clip_to_origin(void) {
     }
 }
 
-static CGRect scroll_visible_bounds(void) {
-    id content_view = msg_id(scroll_ref, "contentView");
-    if (content_view) {
-        return view_bounds(content_view);
+static void scroll_view_to_right(id scroll_view, double content_width, double visible_width) {
+    id content_view = msg_id(scroll_view, "contentView");
+    if (!content_view) {
+        return;
     }
-    return view_bounds(scroll_ref);
+
+    double x = content_width - visible_width;
+    if (x < 0.0) {
+        x = 0.0;
+    }
+
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(
+        content_view,
+        selector("scrollToPoint:"),
+        (CGPoint){x, 0.0}
+    );
+    msg_void_id(scroll_view, "reflectScrolledClipView:", content_view);
 }
 
 static void set_view_frame(id view, CGRect frame) {
@@ -254,6 +276,130 @@ static double clamp_double(double value, double min_value, double max_value) {
         return max_value;
     }
     return value;
+}
+
+static void stats_path(char *buffer, size_t size) {
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        snprintf(buffer, size, "%s/.trideroah_stats", home);
+        return;
+    }
+    snprintf(buffer, size, ".trideroah_stats");
+}
+
+static void save_stats(void) {
+    char path[PATH_MAX];
+    stats_path(path, sizeof(path));
+
+    FILE *file = fopen(path, "w");
+    if (!file) {
+        return;
+    }
+
+    fprintf(file, "TRIDEROAH_STATS 1\n");
+    fprintf(file, "COUNTS %d %d\n", letters_practiced, words_practiced);
+    fprintf(file, "LETTERS %d\n", letter_time_count);
+    for (int i = 0; i < letter_time_count; i++) {
+        fprintf(file, "%d %.17g %d\n", letter_items[i], letter_times[i], letter_failed[i]);
+    }
+
+    fprintf(file, "WORDS %d\n", word_time_count);
+    for (int i = 0; i < word_time_count; i++) {
+        fprintf(
+            file,
+            "%d %.17g %d %.17g %s\n",
+            word_items[i],
+            word_times[i],
+            word_failed[i],
+            word_thresholds[i],
+            word_labels[i]
+        );
+    }
+
+    fclose(file);
+}
+
+static int read_section(FILE *file, const char *expected, int *count) {
+    char label[32];
+    if (fscanf(file, "%31s %d", label, count) != 2) {
+        return 0;
+    }
+    if (strcmp(label, expected) != 0) {
+        return 0;
+    }
+    if (*count < 0) {
+        *count = 0;
+    }
+    if (*count > MAX_RESULTS) {
+        *count = MAX_RESULTS;
+    }
+    return 1;
+}
+
+static void load_stats(void) {
+    char path[PATH_MAX];
+    stats_path(path, sizeof(path));
+
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        return;
+    }
+
+    char header[32];
+    int version = 0;
+    if (fscanf(file, "%31s %d", header, &version) != 2 ||
+        strcmp(header, "TRIDEROAH_STATS") != 0 ||
+        version != 1) {
+        fclose(file);
+        return;
+    }
+
+    char counts_label[32];
+    if (fscanf(file, "%31s %d %d", counts_label, &letters_practiced, &words_practiced) != 3 ||
+        strcmp(counts_label, "COUNTS") != 0) {
+        fclose(file);
+        return;
+    }
+    if (letters_practiced < 0) {
+        letters_practiced = 0;
+    }
+    if (words_practiced < 0) {
+        words_practiced = 0;
+    }
+
+    if (!read_section(file, "LETTERS", &letter_time_count)) {
+        fclose(file);
+        return;
+    }
+    for (int i = 0; i < letter_time_count; i++) {
+        if (fscanf(file, "%d %lf %d", &letter_items[i], &letter_times[i], &letter_failed[i]) != 3) {
+            letter_time_count = i;
+            fclose(file);
+            return;
+        }
+    }
+
+    if (!read_section(file, "WORDS", &word_time_count)) {
+        fclose(file);
+        return;
+    }
+    for (int i = 0; i < word_time_count; i++) {
+        if (fscanf(
+            file,
+            "%d %lf %d %lf %12s",
+            &word_items[i],
+            &word_times[i],
+            &word_failed[i],
+            &word_thresholds[i],
+            word_labels[i]
+        ) != 5) {
+            word_time_count = i;
+            fclose(file);
+            return;
+        }
+    }
+
+    fclose(file);
 }
 
 static void store_result(
@@ -499,6 +645,10 @@ static id make_page(double height) {
 }
 
 static void show_page(id page) {
+    CGRect content_rect = window_content_rect();
+    set_view_frame(scroll_ref, content_rect);
+    msg_void_int(scroll_ref, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
+    msg_void_id(window_ref, "setContentView:", scroll_ref);
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
     msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_id(scroll_ref, "setDocumentView:", page);
@@ -506,11 +656,10 @@ static void show_page(id page) {
 }
 
 static void show_focus_page(id page) {
-    msg_void_bool(scroll_ref, "setHasVerticalScroller:", NO_VALUE);
-    msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
-    set_view_frame(page, rect(0, 0, APP_WIDTH, APP_HEIGHT));
-    msg_void_id(scroll_ref, "setDocumentView:", page);
-    scroll_clip_to_origin();
+    CGRect content_rect = window_content_rect();
+    set_view_frame(page, content_rect);
+    msg_void_int(page, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
+    msg_void_id(window_ref, "setContentView:", page);
 }
 
 static void add_tabs(id root, id self, int active_tab) {
@@ -633,8 +782,9 @@ static void generate_question(char *prompt, size_t prompt_size) {
 
 static void render_practice_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    double page_width = APP_WIDTH;
-    double page_height = APP_HEIGHT;
+    CGRect content_rect = window_content_rect();
+    double page_width = content_rect.size.width;
+    double page_height = content_rect.size.height;
     set_view_frame(root, rect(0, 0, page_width, page_height));
 
     double panel_width = 640.0;
@@ -648,29 +798,32 @@ static void render_practice_screen(id self) {
         top = 80.0;
     }
 
+    id panel = alloc_init_frame("FlippedTrideroahView", rect(left, top, panel_width, panel_height));
+    add_subview(root, panel);
+
     char prompt_text[256];
     generate_question(prompt_text, sizeof(prompt_text));
 
     id prompt = make_label(
         prompt_text,
-        left,
-        top,
+        0,
+        0,
         panel_width,
         34,
         22
     );
     msg_void_id(prompt, "setTextColor:", color("whiteColor"));
     msg_void_int(prompt, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(root, prompt);
+    add_subview(panel, prompt);
 
-    id image_box = alloc_init_frame("FlippedTrideroahView", rect(left, top + 90, 230, 230));
+    id image_box = alloc_init_frame("FlippedTrideroahView", rect(0, 90, 230, 230));
     msg_void_bool(image_box, "setWantsLayer:", YES_VALUE);
     id image_layer = msg_id(image_box, "layer");
     msg_void_ptr(image_layer, "setBackgroundColor:", rgb_cg_color(0.0, 0.0, 0.0, 1.0));
     msg_void_ptr(image_layer, "setBorderColor:", cg_color("whiteColor"));
     msg_void_double(image_layer, "setBorderWidth:", 4.0);
     msg_void_double(image_layer, "setCornerRadius:", 1.0);
-    add_subview(root, image_box);
+    add_subview(panel, image_box);
 
     if (current_mode == PRACTICE_LETTERS) {
         practice_image = alloc_init_frame("NSImageView", rect(30, 30, 170, 170));
@@ -684,7 +837,7 @@ static void render_practice_screen(id self) {
         add_subview(image_box, token_label);
     }
 
-    practice_answer = alloc_init_frame("NSTextField", rect(left + 310, top + 135, 330, 72));
+    practice_answer = alloc_init_frame("NSTextField", rect(310, 135, 330, 72));
     msg_void_id(
         practice_answer,
         "setPlaceholderString:",
@@ -705,22 +858,22 @@ static void render_practice_screen(id self) {
         selector("setAction:"),
         selector("checkPractice:")
     );
-    add_subview(root, practice_answer);
+    add_subview(panel, practice_answer);
 
-    id check_button = make_large_button_sized("Check", self, selector("checkPractice:"), left, top + 360, 310);
+    id check_button = make_large_button_sized("Check", self, selector("checkPractice:"), 0, 360, 310);
     style_button_color(check_button, 0.0, 1.0, 0.0);
     style_button_text(check_button, color("blackColor"));
-    add_subview(root, check_button);
+    add_subview(panel, check_button);
 
-    id dont_button = make_large_button_sized("Don't know", self, selector("dontKnow:"), left + 330, top + 360, 310);
+    id dont_button = make_large_button_sized("Don't know", self, selector("dontKnow:"), 330, 360, 310);
     style_button_color(dont_button, 1.0, 0.12, 0.02);
     style_button_text(dont_button, color("whiteColor"));
-    add_subview(root, dont_button);
+    add_subview(panel, dont_button);
 
-    id exit_button = make_large_button_sized("Save and exit", self, selector("endPractice:"), left, top + 455, 640);
+    id exit_button = make_large_button_sized("Save and exit", self, selector("endPractice:"), 0, 455, 640);
     style_button_color(exit_button, 0.05, 0.2, 1.0);
     style_button_text(exit_button, color("whiteColor"));
-    add_subview(root, exit_button);
+    add_subview(panel, exit_button);
 
     show_focus_page(root);
     msg_void_id(window_ref, "makeFirstResponder:", practice_answer);
@@ -729,11 +882,12 @@ static void render_practice_screen(id self) {
 
 static void render_result_screen(id self, int correct) {
     id root = make_page(APP_HEIGHT);
-    double page_width = APP_WIDTH;
-    double page_height = APP_HEIGHT;
+    CGRect content_rect = window_content_rect();
+    double page_width = content_rect.size.width;
+    double page_height = content_rect.size.height;
     set_view_frame(root, rect(0, 0, page_width, page_height));
 
-    double panel_width = 360.0;
+    double panel_width = 380.0;
     double panel_height = correct ? 400.0 : 560.0;
     double left = (page_width - panel_width) / 2.0;
     double top = (page_height - panel_height) / 2.0;
@@ -744,50 +898,55 @@ static void render_result_screen(id self, int correct) {
         top = 80.0;
     }
 
+    id panel = alloc_init_frame("FlippedTrideroahView", rect(left, top, panel_width, panel_height));
+    add_subview(root, panel);
+
     const char *status = correct ? "Correct" : "Incorrect";
-    id status_label = make_label(status, left - 10, top, 380, 60, 34);
+    id status_label = make_label(status, 0, 0, panel_width, 60, 34);
     msg_void_id(status_label, "setTextColor:", correct ? color("systemGreenColor") : color("systemRedColor"));
     msg_void_int(status_label, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(root, status_label);
+    add_subview(panel, status_label);
 
     if (!correct) {
-        id yours = make_label("Your answer:", left + 50, top + 95, 260, 32, 20);
+        id yours = make_label("Your answer:", 60, 95, 260, 32, 20);
         msg_void_id(yours, "setTextColor:", color("whiteColor"));
         msg_void_int(yours, "setAlignment:", NSTextAlignmentCenter);
-        add_subview(root, yours);
+        add_subview(panel, yours);
 
-        id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", left + 40, top + 145, 280, 42, 20);
+        id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", 50, 145, 280, 42, 20);
         msg_void_id(answer_box, "setTextColor:", rgb_color(0.65, 0.65, 0.65, 1.0));
         msg_void_int(answer_box, "setAlignment:", NSTextAlignmentCenter);
-        add_subview(root, answer_box);
+        add_subview(panel, answer_box);
 
-        id correct_title = make_label("Correct:", left + 80, top + 215, 200, 34, 20);
+        id correct_title = make_label("Correct:", 90, 215, 200, 34, 20);
         msg_void_id(correct_title, "setTextColor:", color("whiteColor"));
         msg_void_int(correct_title, "setAlignment:", NSTextAlignmentCenter);
-        add_subview(root, correct_title);
+        add_subview(panel, correct_title);
     }
 
-    id correct_answer = make_label(last_correct_answer, left, top + (correct ? 110 : 270), 360, 40, 24);
+    id correct_answer = make_label(last_correct_answer, 10, correct ? 110 : 270, 360, 40, 24);
     msg_void_id(correct_answer, "setTextColor:", color("systemGreenColor"));
     msg_void_int(correct_answer, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(root, correct_answer);
+    add_subview(panel, correct_answer);
 
-    id next_button = make_large_button_sized("Next ->", self, selector("nextPractice:"), left + 15, top + (correct ? 210 : 350), 330);
+    const char *next_title = session_answer_count >= PRACTICE_SESSION_LIMIT ? "Finish" : "Next ->";
+    id next_button = make_large_button_sized(next_title, self, selector("nextPractice:"), 25, correct ? 210 : 350, 330);
     style_button_color(next_button, 0.0, 1.0, 0.0);
     style_button_text(next_button, color("blackColor"));
-    add_subview(root, next_button);
+    add_subview(panel, next_button);
 
-    id exit_button = make_large_button_sized("Exit", self, selector("endPractice:"), left + 15, top + (correct ? 310 : 455), 330);
+    id exit_button = make_large_button_sized("Exit", self, selector("endPractice:"), 25, correct ? 310 : 455, 330);
     style_button_color(exit_button, 0.05, 0.2, 1.0);
     style_button_text(exit_button, color("whiteColor"));
-    add_subview(root, exit_button);
+    add_subview(panel, exit_button);
     show_focus_page(root);
 }
 
 static void render_finished_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    double page_width = APP_WIDTH;
-    double page_height = APP_HEIGHT;
+    CGRect content_rect = window_content_rect();
+    double page_width = content_rect.size.width;
+    double page_height = content_rect.size.height;
     set_view_frame(root, rect(0, 0, page_width, page_height));
 
     double left = (page_width - 440.0) / 2.0;
@@ -799,21 +958,31 @@ static void render_finished_screen(id self) {
         top = 80.0;
     }
 
-    id label = make_label("Good Job!\nSee you\nnext time!", left, top, 440, 170, 34);
+    id panel = alloc_init_frame("FlippedTrideroahView", rect(left, top, 440, 400));
+    add_subview(root, panel);
+
+    id label = make_label("Good Job!\nSee you\nnext time!", 0, 0, 440, 170, 34);
     msg_void_id(label, "setTextColor:", color("systemGreenColor"));
     msg_void_int(label, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(root, label);
+    add_subview(panel, label);
 
-    id home_button = make_large_button_sized("Go home", self, selector("showHome:"), left + 40, top + 260, 360);
+    id home_button = make_large_button_sized("Go home", self, selector("showHome:"), 40, 260, 360);
     style_button_color(home_button, 0.0, 1.0, 0.0);
     style_button_text(home_button, color("blackColor"));
-    add_subview(root, home_button);
+    add_subview(panel, home_button);
     show_focus_page(root);
 }
 
 static void next_practice(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
+    if (session_answer_count >= PRACTICE_SESSION_LIMIT) {
+        current_mode = PRACTICE_NONE;
+        awaiting_answer = 0;
+        save_stats();
+        render_finished_screen(self);
+        return;
+    }
     render_practice_screen(self);
 }
 
@@ -884,6 +1053,8 @@ static void check_practice(id self, SEL _cmd, id sender) {
             );
         }
         awaiting_answer = 0;
+        session_answer_count++;
+        save_stats();
     }
 
     last_answer_correct = correct;
@@ -928,6 +1099,8 @@ static void dont_know(id self, SEL _cmd, id sender) {
             );
         }
         awaiting_answer = 0;
+        session_answer_count++;
+        save_stats();
     }
     last_answer_correct = 0;
     render_result_screen(self, 0);
@@ -949,8 +1122,8 @@ static void add_alphabet_grid(id root, double start_y) {
 
 static void render_home(id self) {
     id root = make_page(820);
-    CGRect bounds = scroll_visible_bounds();
-    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
+    CGRect content_rect = window_content_rect();
+    double page_width = content_rect.size.width;
     set_view_frame(root, rect(0, 0, page_width, 820));
     add_header(root, self, 0);
 
@@ -1289,6 +1462,7 @@ static void add_graph(
     double graph_width = graph_width_for_count(count);
     id graph = alloc_init_frame(graph_class, rect(0, 0, graph_width, 300));
     msg_void_id(graph_scroll, "setDocumentView:", graph);
+    scroll_view_to_right(graph_scroll, graph_width, 760.0);
 
     double display_threshold = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : 1.0;
     double max_time = display_threshold;
@@ -1378,6 +1552,7 @@ static void start_letters(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
     current_mode = PRACTICE_LETTERS;
+    session_answer_count = 0;
     render_practice_screen(self);
 }
 
@@ -1385,6 +1560,7 @@ static void start_words_with_length(id self, int min_length, int max_length) {
     word_length_min = min_length;
     word_length_max = max_length;
     current_mode = PRACTICE_WORDS;
+    session_answer_count = 0;
     render_practice_screen(self);
 }
 
@@ -1417,6 +1593,7 @@ static void end_practice(id self, SEL _cmd, id sender) {
     (void)sender;
     current_mode = PRACTICE_NONE;
     awaiting_answer = 0;
+    save_stats();
     render_finished_screen(self);
 }
 
@@ -1466,6 +1643,7 @@ static BOOL should_terminate_after_last_window_closed(id self, SEL _cmd, id send
     (void)self;
     (void)_cmd;
     (void)sender;
+    save_stats();
     return YES_VALUE;
 }
 
@@ -1531,6 +1709,7 @@ static Class make_delegate_class(void) {
 
 static void launch_learn_app(void) {
     srand((unsigned int)time(NULL));
+    load_stats();
     make_flipped_view_class();
     make_graph_view_classes();
     Class delegate_class = make_delegate_class();
