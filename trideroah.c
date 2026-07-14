@@ -37,12 +37,19 @@ enum {
     NSWindowStyleMaskClosable = 1 << 1,
     NSWindowStyleMaskMiniaturizable = 1 << 2,
     NSWindowStyleMaskResizable = 1 << 3,
+    NSWindowStyleMaskFullScreen = 1 << 14,
     NSBackingStoreBuffered = 2,
     NSApplicationActivationPolicyRegular = 0,
     NSImageScaleProportionallyUpOrDown = 3,
     NSTextAlignmentCenter = 2,
-    NSFocusRingTypeDefault = 0
+    NSFocusRingTypeDefault = 0,
+    NSViewWidthSizable = 1 << 1,
+    NSViewHeightSizable = 1 << 4,
+    NSWindowCollectionBehaviorFullScreenPrimary = 1 << 7
 };
+
+#define APP_WIDTH 2048.0
+#define APP_HEIGHT 1280.0
 
 typedef struct {
     const char *letter;
@@ -77,9 +84,7 @@ static const LetterMap letter_map[] = {
 static id window_ref;
 static id scroll_ref;
 static id practice_image;
-static id practice_prompt;
 static id practice_answer;
-static id practice_result;
 static int current_index = 0;
 static char current_word[MAX_WORD_LENGTH + 1];
 static char current_word_token[(MAX_WORD_LENGTH * 2) + 1];
@@ -100,6 +105,9 @@ static char word_labels[MAX_RESULTS][MAX_WORD_LENGTH + 1];
 static int letter_time_count = 0;
 static int word_time_count = 0;
 static int awaiting_answer = 0;
+static char last_user_answer[128];
+static char last_correct_answer[128];
+static int last_answer_correct = 0;
 
 static CGRect rect(double x, double y, double width, double height) {
     CGRect value = {{x, y}, {width, height}};
@@ -169,8 +177,26 @@ static id color(const char *name) {
     return msg_id(cls("NSColor"), name);
 }
 
+static id rgb_color(double red, double green, double blue, double alpha) {
+    return ((id (*)(id, SEL, double, double, double, double))objc_msgSend)(
+        cls("NSColor"),
+        selector("colorWithCalibratedRed:green:blue:alpha:"),
+        red,
+        green,
+        blue,
+        alpha
+    );
+}
+
 static const void *cg_color(const char *name) {
     return ((const void *(*)(id, SEL))objc_msgSend)(color(name), selector("CGColor"));
+}
+
+static const void *rgb_cg_color(double red, double green, double blue, double alpha) {
+    return ((const void *(*)(id, SEL))objc_msgSend)(
+        rgb_color(red, green, blue, alpha),
+        selector("CGColor")
+    );
 }
 
 static void set_draw_color(const char *name) {
@@ -378,16 +404,16 @@ static id make_colored_label(
     return field;
 }
 
-static id make_button(const char *title, id target, SEL action, double x, double y) {
-    id button = alloc_init_frame("NSButton", rect(x, y, 96, 32));
+static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
+    id button = alloc_init_frame("NSButton", rect(x, y, width, 54));
     msg_void_id(button, "setTitle:", ns_string(title));
     msg_void_id(button, "setTarget:", target);
     ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
     return button;
 }
 
-static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    id button = alloc_init_frame("NSButton", rect(x, y, width, 34));
+static id make_large_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
+    id button = alloc_init_frame("NSButton", rect(x, y, width, 86));
     msg_void_id(button, "setTitle:", ns_string(title));
     msg_void_id(button, "setTarget:", target);
     ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
@@ -397,28 +423,68 @@ static id make_button_sized(const char *title, id target, SEL action, double x, 
 static void style_card(id view) {
     msg_void_bool(view, "setWantsLayer:", YES_VALUE);
     id layer = msg_id(view, "layer");
-    msg_void_ptr(layer, "setBackgroundColor:", cg_color("controlBackgroundColor"));
-    msg_void_ptr(layer, "setBorderColor:", cg_color("separatorColor"));
+    msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(0.60, 0.60, 0.60, 1.0));
+    msg_void_ptr(layer, "setBorderColor:", rgb_cg_color(0.60, 0.60, 0.60, 1.0));
     msg_void_double(layer, "setBorderWidth:", 1.0);
-    msg_void_double(layer, "setCornerRadius:", 8.0);
+    msg_void_double(layer, "setCornerRadius:", 18.0);
+}
+
+static void style_page(id view) {
+    msg_void_bool(view, "setWantsLayer:", YES_VALUE);
+    id layer = msg_id(view, "layer");
+    msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(0.0, 0.0, 0.0, 1.0));
+}
+
+static void style_button_color(id button, double red, double green, double blue) {
+    msg_void_bool(button, "setWantsLayer:", YES_VALUE);
+    msg_void_bool(button, "setBordered:", NO_VALUE);
+    id layer = msg_id(button, "layer");
+    msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(red, green, blue, 1.0));
+    msg_void_double(layer, "setCornerRadius:", 28.0);
+}
+
+static void style_small_button_color(id button, double red, double green, double blue) {
+    msg_void_bool(button, "setWantsLayer:", YES_VALUE);
+    msg_void_bool(button, "setBordered:", NO_VALUE);
+    id layer = msg_id(button, "layer");
+    msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(red, green, blue, 1.0));
+    msg_void_double(layer, "setCornerRadius:", 16.0);
+}
+
+static void style_button_text(id button, id text_color) {
+    msg_void_id(button, "setContentTintColor:", text_color);
 }
 
 static void render_home(id self);
 static void render_letters(id self);
 static void render_stats(id self);
+static void render_practice_screen(id self);
+static void render_result_screen(id self, int correct);
+static void render_finished_screen(id self);
 static void next_practice(id self, SEL _cmd, id sender);
 static void check_practice(id self, SEL _cmd, id sender);
 static void end_practice(id self, SEL _cmd, id sender);
+static void dont_know(id self, SEL _cmd, id sender);
 static void start_words_any(id self, SEL _cmd, id sender);
 static void start_words_short(id self, SEL _cmd, id sender);
 static void start_words_medium(id self, SEL _cmd, id sender);
 static void start_words_long(id self, SEL _cmd, id sender);
 
 static id make_page(double height) {
-    return alloc_init_frame("FlippedTrideroahView", rect(0, 0, 960, height));
+    id page = alloc_init_frame("FlippedTrideroahView", rect(0, 0, APP_WIDTH, height));
+    style_page(page);
+    return page;
 }
 
 static void show_page(id page) {
+    msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
+    msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
+    msg_void_id(scroll_ref, "setDocumentView:", page);
+}
+
+static void show_focus_page(id page) {
+    msg_void_bool(scroll_ref, "setHasVerticalScroller:", NO_VALUE);
+    msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_id(scroll_ref, "setDocumentView:", page);
 }
 
@@ -428,15 +494,15 @@ static void add_tabs(id root, id self, int active_tab) {
 
     for (int i = 0; i < 3; i++) {
         id button = make_button_sized(titles[i], self, selector(actions[i]), 24 + i * 112, 100, 100);
-        if (i == active_tab) {
-            msg_void_bool(button, "setEnabled:", NO_VALUE);
-        }
+        style_small_button_color(button, i == active_tab ? 0.70 : 0.08, i == active_tab ? 0.70 : 0.08, i == active_tab ? 0.70 : 0.08);
+        style_button_text(button, i == active_tab ? color("blackColor") : color("whiteColor"));
         add_subview(root, button);
     }
 }
 
 static void add_header(id root, id self, int active_tab) {
     id title = make_label("Learn Trideroah", 24, 20, 500, 38, 30);
+    msg_void_id(title, "setTextColor:", color("whiteColor"));
     add_subview(root, title);
 
     id subtitle = make_label(
@@ -447,7 +513,7 @@ static void add_header(id root, id self, int active_tab) {
         24,
         14
     );
-    msg_void_id(subtitle, "setTextColor:", color("secondaryLabelColor"));
+    msg_void_id(subtitle, "setTextColor:", rgb_color(0.65, 0.65, 0.65, 1.0));
     add_subview(root, subtitle);
     add_tabs(root, self, active_tab);
 }
@@ -464,56 +530,11 @@ static id make_alphabet_tile(const char *letter, const char *token, double x, do
     char text[32];
     snprintf(text, sizeof(text), "%c  %s", (char)toupper((unsigned char)letter[0]), token);
     id title = make_label(text, 10, 86, 120, 24, 15);
+    msg_void_id(title, "setTextColor:", color("whiteColor"));
     msg_void_int(title, "setAlignment:", NSTextAlignmentCenter);
     add_subview(box, title);
 
     return box;
-}
-
-static void make_practice_panel(id root, id self, double y) {
-    id practice_box = alloc_init_frame("FlippedTrideroahView", rect(24, y, 920, 176));
-    style_card(practice_box);
-    add_subview(root, practice_box);
-
-    if (current_mode == PRACTICE_LETTERS) {
-        practice_image = alloc_init_frame("NSImageView", rect(20, 28, 110, 110));
-        msg_void_int(practice_image, "setImageScaling:", NSImageScaleProportionallyUpOrDown);
-        add_subview(practice_box, practice_image);
-    }
-
-    practice_prompt = make_label("", 160, 28, 650, 30, 18);
-    add_subview(practice_box, practice_prompt);
-
-    practice_answer = alloc_init_frame("NSTextField", rect(160, 70, 260, 30));
-    if (current_mode == PRACTICE_WORDS) {
-        msg_void_id(practice_answer, "setPlaceholderString:", ns_string("Type the English word"));
-    } else {
-        msg_void_id(practice_answer, "setPlaceholderString:", ns_string("Type the English letter"));
-    }
-    msg_void_id(practice_answer, "setFont:", font(16));
-    msg_void_bool(practice_answer, "setEditable:", YES_VALUE);
-    msg_void_bool(practice_answer, "setSelectable:", YES_VALUE);
-    msg_void_bool(practice_answer, "setEnabled:", YES_VALUE);
-    msg_void_bool(practice_answer, "setBezeled:", YES_VALUE);
-    msg_void_int(practice_answer, "setFocusRingType:", NSFocusRingTypeDefault);
-    msg_void_id(practice_answer, "setTarget:", self);
-    ((void (*)(id, SEL, SEL))objc_msgSend)(
-        practice_answer,
-        selector("setAction:"),
-        selector("checkPractice:")
-    );
-    add_subview(practice_box, practice_answer);
-
-    id check_button = make_button("Check", self, selector("checkPractice:"), 160, 114);
-    id next_button = make_button("Next", self, selector("nextPractice:"), 266, 114);
-    id end_button = make_button("End", self, selector("endPractice:"), 372, 114);
-    add_subview(practice_box, check_button);
-    add_subview(practice_box, next_button);
-    add_subview(practice_box, end_button);
-
-    practice_result = make_label("", 500, 75, 360, 24, 14);
-    msg_void_id(practice_result, "setTextColor:", color("secondaryLabelColor"));
-    add_subview(practice_box, practice_result);
 }
 
 static int pick_sticky_word(char *buffer, size_t size) {
@@ -556,8 +577,7 @@ static int pick_sticky_word(char *buffer, size_t size) {
     return 1;
 }
 
-static void ask_new_question(void) {
-    char prompt[256];
+static void generate_question(char *prompt, size_t prompt_size) {
     question_started_at = now_seconds();
     awaiting_answer = 1;
 
@@ -568,7 +588,7 @@ static void ask_new_question(void) {
         encode_word_token(current_word, current_word_token, sizeof(current_word_token));
         snprintf(
             prompt,
-            sizeof(prompt),
+            prompt_size,
             "What English word makes '%s'?",
             current_word_token
         );
@@ -579,27 +599,157 @@ static void ask_new_question(void) {
         }
         snprintf(
             prompt,
-            sizeof(prompt),
+            prompt_size,
             "Which English letter makes '%s'?",
             letter_map[current_index].token
         );
     }
+}
 
-    set_string(practice_prompt, prompt);
-    set_string(practice_answer, "");
-    set_string(practice_result, "");
+static void render_practice_screen(id self) {
+    id root = make_page(APP_HEIGHT);
+    char prompt_text[256];
+    generate_question(prompt_text, sizeof(prompt_text));
+
+    id prompt = make_label(
+        prompt_text,
+        620,
+        535,
+        760,
+        34,
+        22
+    );
+    msg_void_id(prompt, "setTextColor:", color("whiteColor"));
+    msg_void_int(prompt, "setAlignment:", NSTextAlignmentCenter);
+    add_subview(root, prompt);
+
+    id image_box = alloc_init_frame("FlippedTrideroahView", rect(650, 615, 230, 230));
+    msg_void_bool(image_box, "setWantsLayer:", YES_VALUE);
+    id image_layer = msg_id(image_box, "layer");
+    msg_void_ptr(image_layer, "setBackgroundColor:", rgb_cg_color(0.0, 0.0, 0.0, 1.0));
+    msg_void_ptr(image_layer, "setBorderColor:", cg_color("whiteColor"));
+    msg_void_double(image_layer, "setBorderWidth:", 4.0);
+    msg_void_double(image_layer, "setCornerRadius:", 1.0);
+    add_subview(root, image_box);
+
+    if (current_mode == PRACTICE_LETTERS) {
+        practice_image = alloc_init_frame("NSImageView", rect(30, 30, 170, 170));
+        msg_void_int(practice_image, "setImageScaling:", NSImageScaleProportionallyUpOrDown);
+        msg_void_id(practice_image, "setImage:", image_for_letter(letter_map[current_index].letter));
+        add_subview(image_box, practice_image);
+    } else {
+        id token_label = make_label(current_word_token, 20, 92, 190, 46, 22);
+        msg_void_id(token_label, "setTextColor:", color("whiteColor"));
+        msg_void_int(token_label, "setAlignment:", NSTextAlignmentCenter);
+        add_subview(image_box, token_label);
+    }
+
+    practice_answer = alloc_init_frame("NSTextField", rect(950, 665, 320, 72));
+    msg_void_id(
+        practice_answer,
+        "setPlaceholderString:",
+        ns_string(current_mode == PRACTICE_WORDS ? "Answer goes here..." : "Answer goes here...")
+    );
+    msg_void_id(practice_answer, "setFont:", font(20));
+    msg_void_id(practice_answer, "setTextColor:", color("whiteColor"));
+    msg_void_id(practice_answer, "setBackgroundColor:", color("blackColor"));
+    msg_void_bool(practice_answer, "setDrawsBackground:", YES_VALUE);
+    msg_void_bool(practice_answer, "setEditable:", YES_VALUE);
+    msg_void_bool(practice_answer, "setSelectable:", YES_VALUE);
+    msg_void_bool(practice_answer, "setEnabled:", YES_VALUE);
+    msg_void_bool(practice_answer, "setBezeled:", YES_VALUE);
+    msg_void_int(practice_answer, "setFocusRingType:", NSFocusRingTypeDefault);
+    msg_void_id(practice_answer, "setTarget:", self);
+    ((void (*)(id, SEL, SEL))objc_msgSend)(
+        practice_answer,
+        selector("setAction:"),
+        selector("checkPractice:")
+    );
+    add_subview(root, practice_answer);
+
+    id check_button = make_large_button_sized("Check", self, selector("checkPractice:"), 640, 905, 310);
+    style_button_color(check_button, 0.0, 1.0, 0.0);
+    style_button_text(check_button, color("blackColor"));
+    add_subview(root, check_button);
+
+    id dont_button = make_large_button_sized("Don't know", self, selector("dontKnow:"), 970, 905, 310);
+    style_button_color(dont_button, 1.0, 0.12, 0.02);
+    style_button_text(dont_button, color("whiteColor"));
+    add_subview(root, dont_button);
+
+    id exit_button = make_large_button_sized("Save and exit", self, selector("endPractice:"), 640, 1010, 640);
+    style_button_color(exit_button, 0.05, 0.2, 1.0);
+    style_button_text(exit_button, color("whiteColor"));
+    add_subview(root, exit_button);
+
+    show_focus_page(root);
     msg_void_id(window_ref, "makeFirstResponder:", practice_answer);
+    msg_void_id(practice_answer, "selectText:", NULL);
+}
+
+static void render_result_screen(id self, int correct) {
+    id root = make_page(APP_HEIGHT);
+    const char *status = correct ? "Correct" : "Incorrect";
+    id status_label = make_label(status, 840, 390, 380, 60, 34);
+    msg_void_id(status_label, "setTextColor:", correct ? color("systemGreenColor") : color("systemRedColor"));
+    msg_void_int(status_label, "setAlignment:", NSTextAlignmentCenter);
+    add_subview(root, status_label);
+
+    if (!correct) {
+        id yours = make_label("Your answer:", 855, 485, 260, 32, 20);
+        msg_void_id(yours, "setTextColor:", color("whiteColor"));
+        msg_void_int(yours, "setAlignment:", NSTextAlignmentCenter);
+        add_subview(root, yours);
+
+        id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", 845, 535, 280, 42, 20);
+        msg_void_id(answer_box, "setTextColor:", rgb_color(0.65, 0.65, 0.65, 1.0));
+        msg_void_int(answer_box, "setAlignment:", NSTextAlignmentCenter);
+        add_subview(root, answer_box);
+
+        id correct_title = make_label("Correct:", 885, 605, 200, 34, 20);
+        msg_void_id(correct_title, "setTextColor:", color("whiteColor"));
+        msg_void_int(correct_title, "setAlignment:", NSTextAlignmentCenter);
+        add_subview(root, correct_title);
+    }
+
+    id correct_answer = make_label(last_correct_answer, 820, correct ? 500 : 660, 360, 40, 24);
+    msg_void_id(correct_answer, "setTextColor:", color("systemGreenColor"));
+    msg_void_int(correct_answer, "setAlignment:", NSTextAlignmentCenter);
+    add_subview(root, correct_answer);
+
+    id next_button = make_large_button_sized("Next ->", self, selector("nextPractice:"), 800, correct ? 600 : 730, 330);
+    style_button_color(next_button, 0.0, 1.0, 0.0);
+    style_button_text(next_button, color("blackColor"));
+    add_subview(root, next_button);
+
+    id exit_button = make_large_button_sized("Exit", self, selector("endPractice:"), 800, correct ? 700 : 835, 330);
+    style_button_color(exit_button, 0.05, 0.2, 1.0);
+    style_button_text(exit_button, color("whiteColor"));
+    add_subview(root, exit_button);
+    show_focus_page(root);
+}
+
+static void render_finished_screen(id self) {
+    id root = make_page(APP_HEIGHT);
+    id label = make_label("Good Job!\nSee you\nnext time!", 800, 320, 440, 170, 34);
+    msg_void_id(label, "setTextColor:", color("systemGreenColor"));
+    msg_void_int(label, "setAlignment:", NSTextAlignmentCenter);
+    add_subview(root, label);
+
+    id home_button = make_large_button_sized("Go home", self, selector("showHome:"), 820, 650, 360);
+    style_button_color(home_button, 0.0, 1.0, 0.0);
+    style_button_text(home_button, color("blackColor"));
+    add_subview(root, home_button);
+    show_focus_page(root);
 }
 
 static void next_practice(id self, SEL _cmd, id sender) {
-    (void)self;
     (void)_cmd;
     (void)sender;
-    ask_new_question();
+    render_practice_screen(self);
 }
 
 static void check_practice(id self, SEL _cmd, id sender) {
-    (void)self;
     (void)_cmd;
     (void)sender;
 
@@ -608,6 +758,7 @@ static void check_practice(id self, SEL _cmd, id sender) {
     while (*answer != '\0' && isspace((unsigned char)*answer)) {
         answer++;
     }
+    snprintf(last_user_answer, sizeof(last_user_answer), "%s", answer);
 
     char message[192];
     int correct = 0;
@@ -631,6 +782,7 @@ static void check_practice(id self, SEL _cmd, id sender) {
             current_word,
             current_word_token
         );
+        snprintf(last_correct_answer, sizeof(last_correct_answer), "%s", current_word);
     } else {
         char expected = letter_map[current_index].letter[0];
         char actual = (char)tolower((unsigned char)answer[0]);
@@ -643,6 +795,7 @@ static void check_practice(id self, SEL _cmd, id sender) {
             (char)toupper((unsigned char)expected),
             letter_map[current_index].token
         );
+        snprintf(last_correct_answer, sizeof(last_correct_answer), "%c", (char)toupper((unsigned char)expected));
     }
 
     if (awaiting_answer) {
@@ -665,12 +818,56 @@ static void check_practice(id self, SEL _cmd, id sender) {
         awaiting_answer = 0;
     }
 
-    msg_void_id(practice_result, "setTextColor:", color(correct ? "systemGreenColor" : "systemRedColor"));
-    set_string(practice_result, message);
+    last_answer_correct = correct;
+    (void)message;
+    render_result_screen(self, correct);
+}
+
+static void dont_know(id self, SEL _cmd, id sender) {
+    (void)_cmd;
+    (void)sender;
+    if (practice_answer) {
+        set_string(practice_answer, "");
+    }
+    snprintf(last_user_answer, sizeof(last_user_answer), "Don't know");
+
+    if (current_mode == PRACTICE_WORDS) {
+        snprintf(last_correct_answer, sizeof(last_correct_answer), "%s", current_word);
+    } else {
+        snprintf(
+            last_correct_answer,
+            sizeof(last_correct_answer),
+            "%c",
+            (char)toupper((unsigned char)letter_map[current_index].letter[0])
+        );
+    }
+
+    if (awaiting_answer) {
+        double reaction = now_seconds() - question_started_at;
+        if (current_mode == PRACTICE_WORDS) {
+            words_practiced++;
+            store_word_result(reaction, current_word, suitable_seconds_for_word(current_word), 1);
+        } else {
+            letters_practiced++;
+            store_result(
+                letter_times,
+                letter_items,
+                letter_failed,
+                &letter_time_count,
+                reaction,
+                current_index,
+                1
+            );
+        }
+        awaiting_answer = 0;
+    }
+    last_answer_correct = 0;
+    render_result_screen(self, 0);
 }
 
 static void add_alphabet_grid(id root, double start_y) {
     id alphabet_heading = make_label("Alphabet", 24, start_y, 200, 28, 20);
+    msg_void_id(alphabet_heading, "setTextColor:", color("whiteColor"));
     add_subview(root, alphabet_heading);
 
     for (int i = 0; i < 26; i++) {
@@ -687,42 +884,48 @@ static void render_home(id self) {
     add_header(root, self, 0);
 
     id heading = make_label("Home", 24, 154, 300, 28, 20);
+    msg_void_id(heading, "setTextColor:", color("whiteColor"));
     add_subview(root, heading);
 
-    id letter_card = alloc_init_frame("FlippedTrideroahView", rect(24, 198, 430, 120));
+    id letter_card = alloc_init_frame("FlippedTrideroahView", rect(24, 198, 430, 164));
     style_card(letter_card);
     add_subview(root, letter_card);
-    add_subview(letter_card, make_label("Practice letters", 18, 16, 240, 26, 18));
+    id letter_title = make_label("Practice letters", 18, 16, 240, 26, 18);
+    msg_void_id(letter_title, "setTextColor:", color("whiteColor"));
+    add_subview(letter_card, letter_title);
     id letter_desc = make_label("See a glyph and token, then type the matching English letter.", 18, 48, 360, 44, 14);
     msg_void_id(letter_desc, "setTextColor:", color("secondaryLabelColor"));
     add_subview(letter_card, letter_desc);
-    add_subview(letter_card, make_button_sized("Practice letters", self, selector("startLetters:"), 260, 70, 140));
+    id letter_button = make_button_sized("Go", self, selector("startLetters:"), 260, 96, 140);
+    style_small_button_color(letter_button, 0.05, 0.2, 1.0);
+    style_button_text(letter_button, color("whiteColor"));
+    add_subview(letter_card, letter_button);
 
     id word_card = alloc_init_frame("FlippedTrideroahView", rect(490, 198, 430, 164));
     style_card(word_card);
     add_subview(root, word_card);
-    add_subview(word_card, make_label("Practice words", 18, 16, 240, 26, 18));
+    id word_title = make_label("Practice words", 18, 16, 240, 26, 18);
+    msg_void_id(word_title, "setTextColor:", color("whiteColor"));
+    add_subview(word_card, word_title);
     id word_desc = make_label("Read a Trideroah word token and type the English word.", 18, 48, 340, 44, 14);
     msg_void_id(word_desc, "setTextColor:", color("secondaryLabelColor"));
     add_subview(word_card, word_desc);
-    add_subview(word_card, make_button_sized("Any", self, selector("startWordsAny:"), 18, 106, 78));
-    add_subview(word_card, make_button_sized("Short", self, selector("startWordsShort:"), 106, 106, 86));
-    add_subview(word_card, make_button_sized("Medium", self, selector("startWordsMedium:"), 202, 106, 98));
-    add_subview(word_card, make_button_sized("Long", self, selector("startWordsLong:"), 310, 106, 84));
-
-    if (current_mode != PRACTICE_NONE) {
-        id practice_heading = make_label(
-            current_mode == PRACTICE_WORDS ? "Practice Words" : "Practice Letters",
-            24,
-            396,
-            300,
-            28,
-            20
-        );
-        add_subview(root, practice_heading);
-        make_practice_panel(root, self, 440);
-        ask_new_question();
-    }
+    id any_button = make_button_sized("Any", self, selector("startWordsAny:"), 18, 106, 78);
+    id short_button = make_button_sized("Short", self, selector("startWordsShort:"), 106, 106, 86);
+    id medium_button = make_button_sized("Medium", self, selector("startWordsMedium:"), 202, 106, 98);
+    id long_button = make_button_sized("Long", self, selector("startWordsLong:"), 310, 106, 84);
+    style_small_button_color(any_button, 0.05, 0.2, 1.0);
+    style_small_button_color(short_button, 0.05, 0.2, 1.0);
+    style_small_button_color(medium_button, 0.05, 0.2, 1.0);
+    style_small_button_color(long_button, 0.05, 0.2, 1.0);
+    style_button_text(any_button, color("whiteColor"));
+    style_button_text(short_button, color("whiteColor"));
+    style_button_text(medium_button, color("whiteColor"));
+    style_button_text(long_button, color("whiteColor"));
+    add_subview(word_card, any_button);
+    add_subview(word_card, short_button);
+    add_subview(word_card, medium_button);
+    add_subview(word_card, long_button);
 
     show_page(root);
 }
@@ -1052,7 +1255,9 @@ static void render_stats(id self) {
     id root = make_page(1120);
     add_header(root, self, 2);
 
-    add_subview(root, make_label("Stats", 24, 154, 300, 28, 20));
+    id stats_title = make_label("Stats", 24, 154, 300, 28, 20);
+    msg_void_id(stats_title, "setTextColor:", color("whiteColor"));
+    add_subview(root, stats_title);
 
     char letter_text[128];
     char word_text[128];
@@ -1061,6 +1266,8 @@ static void render_stats(id self) {
 
     id letter_count = make_label(letter_text, 24, 202, 260, 26, 18);
     id word_count = make_label(word_text, 310, 202, 260, 26, 18);
+    msg_void_id(letter_count, "setTextColor:", color("whiteColor"));
+    msg_void_id(word_count, "setTextColor:", color("whiteColor"));
     add_subview(root, letter_count);
     add_subview(root, word_count);
 
@@ -1091,14 +1298,14 @@ static void start_letters(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
     current_mode = PRACTICE_LETTERS;
-    render_home(self);
+    render_practice_screen(self);
 }
 
 static void start_words_with_length(id self, int min_length, int max_length) {
     word_length_min = min_length;
     word_length_max = max_length;
     current_mode = PRACTICE_WORDS;
-    render_home(self);
+    render_practice_screen(self);
 }
 
 static void start_words_any(id self, SEL _cmd, id sender) {
@@ -1130,7 +1337,7 @@ static void end_practice(id self, SEL _cmd, id sender) {
     (void)sender;
     current_mode = PRACTICE_NONE;
     awaiting_answer = 0;
-    render_home(self);
+    render_finished_screen(self);
 }
 
 static void build_window(id self) {
@@ -1140,19 +1347,23 @@ static void build_window(id self) {
     window_ref = ((id (*)(id, SEL, CGRect, unsigned long, unsigned long, BOOL))objc_msgSend)(
         window_ref,
         selector("initWithContentRect:styleMask:backing:defer:"),
-        rect(0, 0, 980, 650),
+        rect(0, 0, APP_WIDTH, APP_HEIGHT),
         NSWindowStyleMaskTitled |
             NSWindowStyleMaskClosable |
             NSWindowStyleMaskMiniaturizable |
-            NSWindowStyleMaskResizable,
+            NSWindowStyleMaskResizable |
+            NSWindowStyleMaskFullScreen,
         NSBackingStoreBuffered,
         NO_VALUE
     );
     msg_void_id(window_ref, "setTitle:", ns_string("Learn Trideroah"));
+    msg_void_int(window_ref, "setCollectionBehavior:", NSWindowCollectionBehaviorFullScreenPrimary);
     msg_void(window_ref, "center");
 
-    scroll_ref = alloc_init_frame("NSScrollView", rect(0, 0, 980, 650));
+    scroll_ref = alloc_init_frame("NSScrollView", rect(0, 0, APP_WIDTH, APP_HEIGHT));
+    msg_void_int(scroll_ref, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
+    msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_bool(scroll_ref, "setDrawsBackground:", NO_VALUE);
     msg_void_id(window_ref, "setContentView:", scroll_ref);
 
@@ -1222,6 +1433,7 @@ static Class make_delegate_class(void) {
             "c@:@"
         );
         class_addMethod(delegate_class, selector("checkPractice:"), (IMP)check_practice, "v@:@");
+        class_addMethod(delegate_class, selector("dontKnow:"), (IMP)dont_know, "v@:@");
         class_addMethod(delegate_class, selector("nextPractice:"), (IMP)next_practice, "v@:@");
         class_addMethod(delegate_class, selector("showHome:"), (IMP)show_home, "v@:@");
         class_addMethod(delegate_class, selector("showLetters:"), (IMP)show_letters, "v@:@");
