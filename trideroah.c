@@ -50,6 +50,7 @@ enum {
 
 #define APP_WIDTH 2048.0
 #define APP_HEIGHT 1280.0
+#define BUTTON_HEIGHT 54.0
 
 typedef struct {
     const char *letter;
@@ -413,7 +414,7 @@ static id make_colored_label(
 }
 
 static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    id button = alloc_init_frame("NSButton", rect(x, y, width, 54));
+    id button = alloc_init_frame("NSButton", rect(x, y, width, BUTTON_HEIGHT));
     msg_void_id(button, "setTitle:", ns_string(title));
     msg_void_id(button, "setTarget:", target);
     ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
@@ -421,7 +422,7 @@ static id make_button_sized(const char *title, id target, SEL action, double x, 
 }
 
 static id make_large_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    id button = alloc_init_frame("NSButton", rect(x, y, width, 54));
+    id button = alloc_init_frame("NSButton", rect(x, y, width, BUTTON_HEIGHT));
     msg_void_id(button, "setTitle:", ns_string(title));
     msg_void_id(button, "setTarget:", target);
     ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
@@ -448,7 +449,8 @@ static void style_button_color(id button, double red, double green, double blue)
     msg_void_bool(button, "setBordered:", NO_VALUE);
     id layer = msg_id(button, "layer");
     msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(red, green, blue, 1.0));
-    msg_void_double(layer, "setCornerRadius:", 16.0);
+    msg_void_double(layer, "setCornerRadius:", BUTTON_HEIGHT / 2.0);
+    msg_void_bool(layer, "setMasksToBounds:", YES_VALUE);
 }
 
 static void style_button_text(id button, id text_color) {
@@ -929,13 +931,24 @@ static void add_alphabet_grid(id root, double start_y) {
 
 static void render_home(id self) {
     id root = make_page(820);
+    CGRect bounds = view_bounds(scroll_ref);
+    double page_width = bounds.size.width > 1.0 ? bounds.size.width : APP_WIDTH;
+    set_view_frame(root, rect(0, 0, page_width, 820));
     add_header(root, self, 0);
 
-    id heading = make_label("Home", 24, 154, 300, 28, 20);
+    double card_width = 430.0;
+    double card_height = 164.0;
+    double card_gap = 36.0;
+    double content_left = (page_width - ((card_width * 2.0) + card_gap)) / 2.0;
+    if (content_left < 24.0) {
+        content_left = 24.0;
+    }
+
+    id heading = make_label("Home", content_left, 154, 300, 28, 20);
     msg_void_id(heading, "setTextColor:", color("whiteColor"));
     add_subview(root, heading);
 
-    id letter_card = alloc_init_frame("FlippedTrideroahView", rect(24, 198, 430, 164));
+    id letter_card = alloc_init_frame("FlippedTrideroahView", rect(content_left, 198, card_width, card_height));
     style_card(letter_card);
     add_subview(root, letter_card);
     id letter_title = make_label("Practice letters", 18, 16, 240, 26, 18);
@@ -949,7 +962,7 @@ static void render_home(id self) {
     style_button_text(letter_button, color("whiteColor"));
     add_subview(letter_card, letter_button);
 
-    id word_card = alloc_init_frame("FlippedTrideroahView", rect(490, 198, 430, 164));
+    id word_card = alloc_init_frame("FlippedTrideroahView", rect(content_left + card_width + card_gap, 198, card_width, card_height));
     style_card(word_card);
     add_subview(root, word_card);
     id word_title = make_label("Practice words", 18, 16, 240, 26, 18);
@@ -958,10 +971,14 @@ static void render_home(id self) {
     id word_desc = make_label("Read a Trideroah word token and type the English word.", 18, 48, 340, 44, 14);
     msg_void_id(word_desc, "setTextColor:", color("secondaryLabelColor"));
     add_subview(word_card, word_desc);
-    id any_button = make_button_sized("Any", self, selector("startWordsAny:"), 18, 106, 78);
-    id short_button = make_button_sized("Short", self, selector("startWordsShort:"), 106, 106, 86);
-    id medium_button = make_button_sized("Medium", self, selector("startWordsMedium:"), 202, 106, 98);
-    id long_button = make_button_sized("Long", self, selector("startWordsLong:"), 310, 106, 84);
+
+    double button_left = 18.0;
+    double button_gap = 10.0;
+    double button_width = (card_width - (button_left * 2.0) - (button_gap * 3.0)) / 4.0;
+    id any_button = make_button_sized("Any", self, selector("startWordsAny:"), button_left, 106, button_width);
+    id short_button = make_button_sized("Short", self, selector("startWordsShort:"), button_left + (button_width + button_gap), 106, button_width);
+    id medium_button = make_button_sized("Medium", self, selector("startWordsMedium:"), button_left + ((button_width + button_gap) * 2.0), 106, button_width);
+    id long_button = make_button_sized("Long", self, selector("startWordsLong:"), button_left + ((button_width + button_gap) * 3.0), 106, button_width);
     style_button_color(any_button, 0.05, 0.2, 1.0);
     style_button_color(short_button, 0.05, 0.2, 1.0);
     style_button_color(medium_button, 0.05, 0.2, 1.0);
