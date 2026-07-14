@@ -49,16 +49,17 @@ typedef struct {
     const char *token;
 } LetterMap;
 
-typedef struct {
-    const char *english;
-    const char *token;
-} WordMap;
-
 typedef enum {
     PRACTICE_NONE = 0,
     PRACTICE_LETTERS = 1,
     PRACTICE_WORDS = 2
 } PracticeMode;
+
+#define MAX_RESULTS 64
+#define LETTER_SUITABLE_SECONDS 3.0
+#define WORD_BASE_SUITABLE_SECONDS 1.5
+#define WORD_SECONDS_PER_LETTER 0.75
+#define MAX_WORD_LENGTH 12
 
 static const char *fallback_asset_root =
     "/Users/tristan/Desktop/skill building/technical/coding/Tristan/Apps/Translation/Translation/Assets.xcassets";
@@ -73,17 +74,6 @@ static const LetterMap letter_map[] = {
     {"z", "tu"}
 };
 
-static const WordMap word_map[] = {
-    {"hello", "eninteteta"},
-    {"world", "ratasiteku"},
-    {"learn", "teintelisak"},
-    {"practice", "hasilikrpudekrin"},
-    {"letters", "teinputpuinsizi"},
-    {"words", "ratasiukzi"},
-    {"glyph", "altenmihaen"},
-    {"trideroah", "pusidekuinsitalien"}
-};
-
 static id window_ref;
 static id scroll_ref;
 static id practice_image;
@@ -91,13 +81,22 @@ static id practice_prompt;
 static id practice_answer;
 static id practice_result;
 static int current_index = 0;
-static int current_word_index = 0;
+static char current_word[MAX_WORD_LENGTH + 1];
+static char current_word_token[(MAX_WORD_LENGTH * 2) + 1];
+static int word_length_min = 3;
+static int word_length_max = 9;
 static PracticeMode current_mode = PRACTICE_NONE;
 static double question_started_at = 0.0;
 static int letters_practiced = 0;
 static int words_practiced = 0;
-static double letter_times[64];
-static double word_times[64];
+static double letter_times[MAX_RESULTS];
+static double word_times[MAX_RESULTS];
+static int letter_items[MAX_RESULTS];
+static int word_items[MAX_RESULTS];
+static int letter_failed[MAX_RESULTS];
+static int word_failed[MAX_RESULTS];
+static double word_thresholds[MAX_RESULTS];
+static char word_labels[MAX_RESULTS][MAX_WORD_LENGTH + 1];
 static int letter_time_count = 0;
 static int word_time_count = 0;
 static int awaiting_answer = 0;
@@ -174,6 +173,10 @@ static const void *cg_color(const char *name) {
     return ((const void *(*)(id, SEL))objc_msgSend)(color(name), selector("CGColor"));
 }
 
+static void set_draw_color(const char *name) {
+    msg_void(color(name), "set");
+}
+
 static void add_subview(id parent, id child) {
     msg_void_id(parent, "addSubview:", child);
 }
@@ -198,17 +201,101 @@ static double clamp_double(double value, double min_value, double max_value) {
     return value;
 }
 
-static void store_time(double *times, int *count, double value) {
-    if (*count < 64) {
+static void store_result(
+    double *times,
+    int *items,
+    int *failed,
+    int *count,
+    double value,
+    int item,
+    int did_fail
+) {
+    if (*count < MAX_RESULTS) {
         times[*count] = value;
+        items[*count] = item;
+        failed[*count] = did_fail;
         *count += 1;
         return;
     }
 
-    for (int i = 1; i < 64; i++) {
+    for (int i = 1; i < MAX_RESULTS; i++) {
         times[i - 1] = times[i];
+        items[i - 1] = items[i];
+        failed[i - 1] = failed[i];
     }
-    times[63] = value;
+    times[MAX_RESULTS - 1] = value;
+    items[MAX_RESULTS - 1] = item;
+    failed[MAX_RESULTS - 1] = did_fail;
+}
+
+static void store_word_result(double value, const char *word, double threshold, int did_fail) {
+    int item = word_time_count < MAX_RESULTS ? word_time_count : MAX_RESULTS - 1;
+
+    if (word_time_count >= MAX_RESULTS) {
+        for (int i = 1; i < MAX_RESULTS; i++) {
+            word_times[i - 1] = word_times[i];
+            word_items[i - 1] = word_items[i];
+            word_failed[i - 1] = word_failed[i];
+            word_thresholds[i - 1] = word_thresholds[i];
+            snprintf(word_labels[i - 1], sizeof(word_labels[i - 1]), "%s", word_labels[i]);
+        }
+    } else {
+        word_time_count++;
+    }
+
+    word_times[item] = value;
+    word_items[item] = item;
+    word_failed[item] = did_fail;
+    word_thresholds[item] = threshold;
+    snprintf(word_labels[item], sizeof(word_labels[item]), "%s", word);
+}
+
+static double suitable_seconds_for_word(const char *word) {
+    return WORD_BASE_SUITABLE_SECONDS + (double)strlen(word) * WORD_SECONDS_PER_LETTER;
+}
+
+static const char *token_for_letter_char(char letter) {
+    int index = letter - 'a';
+    if (index < 0 || index >= 26) {
+        return "";
+    }
+    return letter_map[index].token;
+}
+
+static void encode_word_token(const char *word, char *buffer, size_t size) {
+    buffer[0] = '\0';
+    size_t used = 0;
+    for (size_t i = 0; word[i] != '\0'; i++) {
+        const char *token = token_for_letter_char(word[i]);
+        int written = snprintf(buffer + used, size > used ? size - used : 0, "%s", token);
+        if (written < 0) {
+            break;
+        }
+        used += (size_t)written;
+        if (used >= size) {
+            buffer[size - 1] = '\0';
+            break;
+        }
+    }
+}
+
+static void random_word(char *buffer, size_t size) {
+    int min_length = word_length_min;
+    int max_length = word_length_max;
+    if (min_length < 1) {
+        min_length = 1;
+    }
+    if (max_length < min_length) {
+        max_length = min_length;
+    }
+    int length = min_length + rand() % (max_length - min_length + 1);
+    if ((size_t)length >= size) {
+        length = (int)size - 1;
+    }
+    for (int i = 0; i < length; i++) {
+        buffer[i] = (char)('a' + rand() % 26);
+    }
+    buffer[length] = '\0';
 }
 
 static int directory_exists(const char *path) {
@@ -277,6 +364,20 @@ static id make_label(const char *text, double x, double y, double width, double 
     return field;
 }
 
+static id make_colored_label(
+    const char *text,
+    double x,
+    double y,
+    double width,
+    double height,
+    double size,
+    const char *color_name
+) {
+    id field = make_label(text, x, y, width, height, size);
+    msg_void_id(field, "setTextColor:", color(color_name));
+    return field;
+}
+
 static id make_button(const char *title, id target, SEL action, double x, double y) {
     id button = alloc_init_frame("NSButton", rect(x, y, 96, 32));
     msg_void_id(button, "setTitle:", ns_string(title));
@@ -307,6 +408,11 @@ static void render_letters(id self);
 static void render_stats(id self);
 static void next_practice(id self, SEL _cmd, id sender);
 static void check_practice(id self, SEL _cmd, id sender);
+static void end_practice(id self, SEL _cmd, id sender);
+static void start_words_any(id self, SEL _cmd, id sender);
+static void start_words_short(id self, SEL _cmd, id sender);
+static void start_words_medium(id self, SEL _cmd, id sender);
+static void start_words_long(id self, SEL _cmd, id sender);
 
 static id make_page(double height) {
     return alloc_init_frame("FlippedTrideroahView", rect(0, 0, 960, height));
@@ -400,12 +506,54 @@ static void make_practice_panel(id root, id self, double y) {
 
     id check_button = make_button("Check", self, selector("checkPractice:"), 160, 114);
     id next_button = make_button("Next", self, selector("nextPractice:"), 266, 114);
+    id end_button = make_button("End", self, selector("endPractice:"), 372, 114);
     add_subview(practice_box, check_button);
     add_subview(practice_box, next_button);
+    add_subview(practice_box, end_button);
 
-    practice_result = make_label("", 440, 75, 360, 24, 14);
+    practice_result = make_label("", 500, 75, 360, 24, 14);
     msg_void_id(practice_result, "setTextColor:", color("secondaryLabelColor"));
     add_subview(practice_box, practice_result);
+}
+
+static int pick_sticky_word(char *buffer, size_t size) {
+    char labels[MAX_RESULTS][MAX_WORD_LENGTH + 1];
+    double latest[MAX_RESULTS] = {0.0};
+    int count = 0;
+
+    for (int i = 0; i < word_time_count; i++) {
+        int item = -1;
+        for (int j = 0; j < count; j++) {
+            if (strcmp(labels[j], word_labels[i]) == 0) {
+                item = j;
+                break;
+            }
+        }
+        if (item < 0 && count < MAX_RESULTS) {
+            item = count++;
+            snprintf(labels[item], sizeof(labels[item]), "%s", word_labels[i]);
+        }
+        if (item >= 0) {
+            latest[item] = word_times[i];
+        }
+    }
+
+    int best = -1;
+    double best_time = 0.0;
+    for (int i = 0; i < count; i++) {
+        double threshold = suitable_seconds_for_word(labels[i]);
+        if (latest[i] > threshold && latest[i] > best_time) {
+            best = i;
+            best_time = latest[i];
+        }
+    }
+
+    if (best < 0) {
+        return 0;
+    }
+
+    snprintf(buffer, size, "%s", labels[best]);
+    return 1;
 }
 
 static void ask_new_question(void) {
@@ -414,12 +562,15 @@ static void ask_new_question(void) {
     awaiting_answer = 1;
 
     if (current_mode == PRACTICE_WORDS) {
-        current_word_index = rand() % (int)(sizeof(word_map) / sizeof(word_map[0]));
+        if (rand() % 3 != 0 || !pick_sticky_word(current_word, sizeof(current_word))) {
+            random_word(current_word, sizeof(current_word));
+        }
+        encode_word_token(current_word, current_word_token, sizeof(current_word_token));
         snprintf(
             prompt,
             sizeof(prompt),
             "What English word makes '%s'?",
-            word_map[current_word_index].token
+            current_word_token
         );
     } else {
         current_index = rand() % (int)(sizeof(letter_map) / sizeof(letter_map[0]));
@@ -471,14 +622,14 @@ static void check_practice(id self, SEL _cmd, id sender) {
             normalized[i] = (char)tolower((unsigned char)answer[i]);
         }
         normalized[answer_len] = '\0';
-        correct = strcmp(normalized, word_map[current_word_index].english) == 0;
+        correct = strcmp(normalized, current_word) == 0;
         snprintf(
             message,
             sizeof(message),
             "%s: %s = %s",
             correct ? "Correct" : "Answer",
-            word_map[current_word_index].english,
-            word_map[current_word_index].token
+            current_word,
+            current_word_token
         );
     } else {
         char expected = letter_map[current_index].letter[0];
@@ -498,10 +649,18 @@ static void check_practice(id self, SEL _cmd, id sender) {
         double reaction = now_seconds() - question_started_at;
         if (current_mode == PRACTICE_WORDS) {
             words_practiced++;
-            store_time(word_times, &word_time_count, reaction);
+            store_word_result(reaction, current_word, suitable_seconds_for_word(current_word), !correct);
         } else {
             letters_practiced++;
-            store_time(letter_times, &letter_time_count, reaction);
+            store_result(
+                letter_times,
+                letter_items,
+                letter_failed,
+                &letter_time_count,
+                reaction,
+                current_index,
+                !correct
+            );
         }
         awaiting_answer = 0;
     }
@@ -524,7 +683,7 @@ static void add_alphabet_grid(id root, double start_y) {
 }
 
 static void render_home(id self) {
-    id root = make_page(760);
+    id root = make_page(820);
     add_header(root, self, 0);
 
     id heading = make_label("Home", 24, 154, 300, 28, 20);
@@ -539,26 +698,29 @@ static void render_home(id self) {
     add_subview(letter_card, letter_desc);
     add_subview(letter_card, make_button_sized("Practice letters", self, selector("startLetters:"), 260, 70, 140));
 
-    id word_card = alloc_init_frame("FlippedTrideroahView", rect(490, 198, 430, 120));
+    id word_card = alloc_init_frame("FlippedTrideroahView", rect(490, 198, 430, 164));
     style_card(word_card);
     add_subview(root, word_card);
     add_subview(word_card, make_label("Practice words", 18, 16, 240, 26, 18));
     id word_desc = make_label("Read a Trideroah word token and type the English word.", 18, 48, 340, 44, 14);
     msg_void_id(word_desc, "setTextColor:", color("secondaryLabelColor"));
     add_subview(word_card, word_desc);
-    add_subview(word_card, make_button_sized("Practice words", self, selector("startWords:"), 270, 70, 130));
+    add_subview(word_card, make_button_sized("Any", self, selector("startWordsAny:"), 18, 106, 78));
+    add_subview(word_card, make_button_sized("Short", self, selector("startWordsShort:"), 106, 106, 86));
+    add_subview(word_card, make_button_sized("Medium", self, selector("startWordsMedium:"), 202, 106, 98));
+    add_subview(word_card, make_button_sized("Long", self, selector("startWordsLong:"), 310, 106, 84));
 
     if (current_mode != PRACTICE_NONE) {
         id practice_heading = make_label(
             current_mode == PRACTICE_WORDS ? "Practice Words" : "Practice Letters",
             24,
-            364,
+            396,
             300,
             28,
             20
         );
         add_subview(root, practice_heading);
-        make_practice_panel(root, self, 408);
+        make_practice_panel(root, self, 440);
         ask_new_question();
     }
 
@@ -572,44 +734,322 @@ static void render_letters(id self) {
     show_page(root);
 }
 
-static id make_bar(double x, double y, double width, const char *color_name) {
-    id bar = alloc_init_frame("FlippedTrideroahView", rect(x, y, width, 18));
-    msg_void_bool(bar, "setWantsLayer:", YES_VALUE);
-    id layer = msg_id(bar, "layer");
-    msg_void_ptr(layer, "setBackgroundColor:", cg_color(color_name));
-    msg_void_double(layer, "setCornerRadius:", 4.0);
-    return bar;
+static id bezier_path(void) {
+    return msg_id(cls("NSBezierPath"), "bezierPath");
 }
 
-static void add_graph(id root, const char *title, double *times, int count, double y, const char *bar_color) {
-    add_subview(root, make_label(title, 24, y, 300, 26, 18));
+static void path_move(id path, double x, double y) {
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(path, selector("moveToPoint:"), (CGPoint){x, y});
+}
+
+static void path_line(id path, double x, double y) {
+    ((void (*)(id, SEL, CGPoint))objc_msgSend)(path, selector("lineToPoint:"), (CGPoint){x, y});
+}
+
+static void path_line_width(id path, double width) {
+    msg_void_double(path, "setLineWidth:", width);
+}
+
+static void path_dash(id path, double first, double second) {
+    double pattern[2] = {first, second};
+    ((void (*)(id, SEL, const double *, long, double))objc_msgSend)(
+        path,
+        selector("setLineDash:count:phase:"),
+        pattern,
+        2,
+        0.0
+    );
+}
+
+static void path_stroke(id path) {
+    msg_void(path, "stroke");
+}
+
+static void fill_oval(double x, double y, double width, double height) {
+    id oval = ((id (*)(id, SEL, CGRect))objc_msgSend)(
+        cls("NSBezierPath"),
+        selector("bezierPathWithOvalInRect:"),
+        rect(x, y, width, height)
+    );
+    msg_void(oval, "fill");
+}
+
+static double graph_width_for_count(int count) {
+    double width = 760.0;
+    double expanded = 180.0 + (double)(count > 1 ? count : 1) * 90.0;
+    return expanded > width ? expanded : width;
+}
+
+static void draw_line_graph(int graph_kind) {
+    double *times = graph_kind == 1 ? letter_times : word_times;
+    int *failed = graph_kind == 1 ? letter_failed : word_failed;
+    int count = graph_kind == 1 ? letter_time_count : word_time_count;
+    double left = 84.0;
+    double top = 34.0;
+    double bottom = 244.0;
+    double graph_width = graph_width_for_count(count);
+    double right = graph_width - 50.0;
+    double plot_height = bottom - top;
+
+    set_draw_color("blackColor");
+    id background = ((id (*)(id, SEL, CGRect))objc_msgSend)(
+        cls("NSBezierPath"),
+        selector("bezierPathWithRect:"),
+        rect(0, 0, graph_width, 300)
+    );
+    msg_void(background, "fill");
+
+    set_draw_color("whiteColor");
+    id axes = bezier_path();
+    path_line_width(axes, 4.0);
+    path_move(axes, left, top);
+    path_line(axes, left, bottom);
+    path_line(axes, right, bottom);
+    path_stroke(axes);
+
+    double now_x = right - 70.0;
+    set_draw_color("systemRedColor");
+    id now_line = bezier_path();
+    path_line_width(now_line, 4.0);
+    path_dash(now_line, 10.0, 8.0);
+    path_move(now_line, now_x, top);
+    path_line(now_line, now_x, bottom);
+    path_stroke(now_line);
+
     if (count == 0) {
-        id empty = make_label("No answers yet.", 24, y + 36, 300, 24, 14);
-        msg_void_id(empty, "setTextColor:", color("secondaryLabelColor"));
-        add_subview(root, empty);
         return;
     }
 
-    int start = count > 12 ? count - 12 : 0;
-    double max_time = 1.0;
+    int start = 0;
+    int visible = count - start;
+    double max_time = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : 1.0;
     for (int i = start; i < count; i++) {
         if (times[i] > max_time) {
             max_time = times[i];
         }
+        double threshold = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : word_thresholds[i];
+        if (threshold > max_time) {
+            max_time = threshold;
+        }
     }
 
-    for (int i = start; i < count; i++) {
-        double row_y = y + 38 + (i - start) * 28;
-        char label_text[64];
-        snprintf(label_text, sizeof(label_text), "%.2fs", times[i]);
-        add_subview(root, make_label(label_text, 24, row_y - 2, 70, 22, 13));
-        double width = clamp_double((times[i] / max_time) * 420.0, 8.0, 420.0);
-        add_subview(root, make_bar(96, row_y, width, bar_color));
+    double graph_max = max_time * 1.15;
+    if (graph_max < 1.0) {
+        graph_max = 1.0;
+    }
+
+    set_draw_color("systemGreenColor");
+    id threshold_line = bezier_path();
+    path_line_width(threshold_line, 3.0);
+    path_dash(threshold_line, 8.0, 8.0);
+    for (int i = 0; i < visible; i++) {
+        double fraction = visible == 1 ? 1.0 : (double)i / (double)(visible - 1);
+        double x = left + fraction * (now_x - left);
+        double threshold = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : word_thresholds[start + i];
+        double value = clamp_double(threshold / graph_max, 0.0, 1.0);
+        double y = bottom - value * plot_height;
+        if (i == 0) {
+            path_move(threshold_line, x, y);
+        } else {
+            path_line(threshold_line, x, y);
+        }
+    }
+    path_stroke(threshold_line);
+
+    set_draw_color("systemBlueColor");
+    id line = bezier_path();
+    path_line_width(line, 5.0);
+
+    for (int i = 0; i < visible; i++) {
+        double fraction = visible == 1 ? 1.0 : (double)i / (double)(visible - 1);
+        double x = left + fraction * (now_x - left);
+        double value = clamp_double(times[start + i] / graph_max, 0.0, 1.0);
+        double y = bottom - value * plot_height;
+
+        if (i == 0) {
+            path_move(line, x, y);
+        } else {
+            path_line(line, x, y);
+        }
+    }
+    path_stroke(line);
+
+    for (int i = 0; i < visible; i++) {
+        double fraction = visible == 1 ? 1.0 : (double)i / (double)(visible - 1);
+        double x = left + fraction * (now_x - left);
+        double value = clamp_double(times[start + i] / graph_max, 0.0, 1.0);
+        double y = bottom - value * plot_height;
+        set_draw_color(failed[start + i] ? "systemRedColor" : "systemBlueColor");
+        fill_oval(x - 10.0, y - 10.0, 20.0, 20.0);
     }
 }
 
+static void draw_letter_graph(id self, SEL _cmd, CGRect dirty_rect) {
+    (void)self;
+    (void)_cmd;
+    (void)dirty_rect;
+    draw_line_graph(1);
+}
+
+static void draw_word_graph(id self, SEL _cmd, CGRect dirty_rect) {
+    (void)self;
+    (void)_cmd;
+    (void)dirty_rect;
+    draw_line_graph(2);
+}
+
+static void sticky_text_for_kind(int graph_kind, char *buffer, size_t size) {
+    double *times = graph_kind == 1 ? letter_times : word_times;
+    int count = graph_kind == 1 ? letter_time_count : word_time_count;
+    double latest_times[MAX_RESULTS] = {0.0};
+    int latest_seen[MAX_RESULTS] = {0};
+    char latest_labels[MAX_RESULTS][MAX_WORD_LENGTH + 1];
+    int item_count = 0;
+
+    if (graph_kind == 1) {
+        for (int i = 0; i < count; i++) {
+            int item = letter_items[i];
+            if (item >= 0 && item < 26) {
+                latest_seen[item] = 1;
+                latest_times[item] = times[i];
+            }
+        }
+        item_count = 26;
+    } else {
+        for (int i = 0; i < count; i++) {
+            int item = -1;
+            for (int j = 0; j < item_count; j++) {
+                if (strcmp(latest_labels[j], word_labels[i]) == 0) {
+                    item = j;
+                    break;
+                }
+            }
+            if (item < 0 && item_count < MAX_RESULTS) {
+                item = item_count++;
+                snprintf(latest_labels[item], sizeof(latest_labels[item]), "%s", word_labels[i]);
+            }
+            if (item >= 0) {
+                latest_seen[item] = 1;
+                latest_times[item] = times[i];
+            }
+        }
+    }
+
+    int chosen[5] = {-1, -1, -1, -1, -1};
+    for (int slot = 0; slot < 5; slot++) {
+        int best = -1;
+        double best_time = 0.0;
+        for (int i = 0; i < item_count; i++) {
+            int already_chosen = 0;
+            for (int j = 0; j < slot; j++) {
+                if (chosen[j] == i) {
+                    already_chosen = 1;
+                }
+            }
+            const char *label = graph_kind == 1 ? letter_map[i].letter : latest_labels[i];
+            double threshold = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : suitable_seconds_for_word(label);
+            if (!already_chosen && latest_seen[i] && latest_times[i] > threshold && latest_times[i] > best_time) {
+                best = i;
+                best_time = latest_times[i];
+            }
+        }
+        chosen[slot] = best;
+    }
+
+    snprintf(buffer, size, "Sticky: ");
+    size_t used = strlen(buffer);
+    int added = 0;
+    for (int i = 0; i < 5 && chosen[i] >= 0; i++) {
+        const char *label = graph_kind == 1
+            ? letter_map[chosen[i]].letter
+            : latest_labels[chosen[i]];
+        int written = snprintf(
+            buffer + used,
+            size > used ? size - used : 0,
+            "%s%s",
+            added ? ", " : "",
+            label
+        );
+        if (written < 0) {
+            break;
+        }
+        used += (size_t)written;
+        added++;
+    }
+
+    if (!added) {
+        snprintf(buffer, size, "Sticky: none");
+    }
+}
+
+static void add_graph(
+    id root,
+    const char *title,
+    double *times,
+    int count,
+    double y,
+    const char *graph_class,
+    int graph_kind
+) {
+    add_subview(root, make_label(title, 24, y, 300, 26, 18));
+
+    id card = alloc_init_frame("FlippedTrideroahView", rect(24, y + 40, 780, 320));
+    style_card(card);
+    add_subview(root, card);
+
+    id graph_scroll = alloc_init_frame("NSScrollView", rect(10, 10, 760, 300));
+    msg_void_bool(graph_scroll, "setHasHorizontalScroller:", YES_VALUE);
+    msg_void_bool(graph_scroll, "setHasVerticalScroller:", YES_VALUE);
+    msg_void_bool(graph_scroll, "setDrawsBackground:", NO_VALUE);
+    add_subview(card, graph_scroll);
+
+    double graph_width = graph_width_for_count(count);
+    id graph = alloc_init_frame(graph_class, rect(0, 0, graph_width, 300));
+    msg_void_id(graph_scroll, "setDocumentView:", graph);
+
+    double display_threshold = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : 1.0;
+    double max_time = display_threshold;
+    for (int i = 0; i < count; i++) {
+        if (times[i] > max_time) {
+            max_time = times[i];
+        }
+        double item_threshold = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : word_thresholds[i];
+        if (item_threshold > max_time) {
+            max_time = item_threshold;
+        }
+        display_threshold = item_threshold;
+    }
+    max_time *= 1.15;
+
+    char max_label[32];
+    char mid_label[32];
+    snprintf(max_label, sizeof(max_label), "%.1fs", max_time);
+    snprintf(mid_label, sizeof(mid_label), "%.1fs", max_time / 2.0);
+
+    add_subview(card, make_colored_label(max_label, 18, 34, 58, 24, 14, "whiteColor"));
+    add_subview(card, make_colored_label(mid_label, 18, 136, 58, 24, 14, "whiteColor"));
+    add_subview(card, make_colored_label("0s", 34, 242, 42, 24, 14, "whiteColor"));
+    add_subview(card, make_colored_label("Start", 104, 264, 80, 24, 14, "whiteColor"));
+    add_subview(card, make_colored_label("Now", 672, 264, 80, 24, 14, "systemRedColor"));
+    double threshold_value = clamp_double(display_threshold / max_time, 0.0, 1.0);
+    double suitable_y = 10.0 + 244.0 - threshold_value * (244.0 - 34.0) - 12.0;
+    add_subview(card, make_colored_label("Suitable", 612, suitable_y, 100, 24, 13, "systemGreenColor"));
+
+    if (count == 0) {
+        id empty = make_label("No answers yet.", 330, y + 176, 180, 24, 14);
+        msg_void_id(empty, "setTextColor:", color("secondaryLabelColor"));
+        add_subview(root, empty);
+    }
+
+    char sticky[256];
+    sticky_text_for_kind(graph_kind, sticky, sizeof(sticky));
+    id sticky_label = make_label(sticky, 24, y + 372, 760, 24, 15);
+    msg_void_id(sticky_label, "setTextColor:", color("secondaryLabelColor"));
+    add_subview(root, sticky_label);
+}
+
 static void render_stats(id self) {
-    id root = make_page(1040);
+    id root = make_page(1120);
     add_header(root, self, 2);
 
     add_subview(root, make_label("Stats", 24, 154, 300, 28, 20));
@@ -624,8 +1064,8 @@ static void render_stats(id self) {
     add_subview(root, letter_count);
     add_subview(root, word_count);
 
-    add_graph(root, "Letter reaction time", letter_times, letter_time_count, 264, "systemBlueColor");
-    add_graph(root, "Word reaction time", word_times, word_time_count, 626, "systemGreenColor");
+    add_graph(root, "Letter reaction time", letter_times, letter_time_count, 264, "TrideroahLetterGraphView", 1);
+    add_graph(root, "Word reaction time", word_times, word_time_count, 676, "TrideroahWordGraphView", 2);
     show_page(root);
 }
 
@@ -654,10 +1094,42 @@ static void start_letters(id self, SEL _cmd, id sender) {
     render_home(self);
 }
 
-static void start_words(id self, SEL _cmd, id sender) {
+static void start_words_with_length(id self, int min_length, int max_length) {
+    word_length_min = min_length;
+    word_length_max = max_length;
+    current_mode = PRACTICE_WORDS;
+    render_home(self);
+}
+
+static void start_words_any(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
-    current_mode = PRACTICE_WORDS;
+    start_words_with_length(self, 3, 9);
+}
+
+static void start_words_short(id self, SEL _cmd, id sender) {
+    (void)_cmd;
+    (void)sender;
+    start_words_with_length(self, 3, 4);
+}
+
+static void start_words_medium(id self, SEL _cmd, id sender) {
+    (void)_cmd;
+    (void)sender;
+    start_words_with_length(self, 5, 7);
+}
+
+static void start_words_long(id self, SEL _cmd, id sender) {
+    (void)_cmd;
+    (void)sender;
+    start_words_with_length(self, 8, 12);
+}
+
+static void end_practice(id self, SEL _cmd, id sender) {
+    (void)_cmd;
+    (void)sender;
+    current_mode = PRACTICE_NONE;
+    awaiting_answer = 0;
     render_home(self);
 }
 
@@ -716,6 +1188,23 @@ static Class make_flipped_view_class(void) {
     return objc_getClass("FlippedTrideroahView");
 }
 
+static void make_graph_view_classes(void) {
+    Class superclass = objc_getClass("NSView");
+    Class letter_class = objc_allocateClassPair(superclass, "TrideroahLetterGraphView", 0);
+    if (letter_class) {
+        class_addMethod(letter_class, selector("isFlipped"), (IMP)should_terminate_after_last_window_closed, "c@:");
+        class_addMethod(letter_class, selector("drawRect:"), (IMP)draw_letter_graph, "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
+        objc_registerClassPair(letter_class);
+    }
+
+    Class word_class = objc_allocateClassPair(superclass, "TrideroahWordGraphView", 0);
+    if (word_class) {
+        class_addMethod(word_class, selector("isFlipped"), (IMP)should_terminate_after_last_window_closed, "c@:");
+        class_addMethod(word_class, selector("drawRect:"), (IMP)draw_word_graph, "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
+        objc_registerClassPair(word_class);
+    }
+}
+
 static Class make_delegate_class(void) {
     Class superclass = objc_getClass("NSObject");
     Class delegate_class = objc_allocateClassPair(superclass, "TrideroahLearnDelegate", 0);
@@ -738,7 +1227,11 @@ static Class make_delegate_class(void) {
         class_addMethod(delegate_class, selector("showLetters:"), (IMP)show_letters, "v@:@");
         class_addMethod(delegate_class, selector("showStats:"), (IMP)show_stats, "v@:@");
         class_addMethod(delegate_class, selector("startLetters:"), (IMP)start_letters, "v@:@");
-        class_addMethod(delegate_class, selector("startWords:"), (IMP)start_words, "v@:@");
+        class_addMethod(delegate_class, selector("startWordsAny:"), (IMP)start_words_any, "v@:@");
+        class_addMethod(delegate_class, selector("startWordsShort:"), (IMP)start_words_short, "v@:@");
+        class_addMethod(delegate_class, selector("startWordsMedium:"), (IMP)start_words_medium, "v@:@");
+        class_addMethod(delegate_class, selector("startWordsLong:"), (IMP)start_words_long, "v@:@");
+        class_addMethod(delegate_class, selector("endPractice:"), (IMP)end_practice, "v@:@");
         objc_registerClassPair(delegate_class);
     }
     return objc_getClass("TrideroahLearnDelegate");
@@ -747,6 +1240,7 @@ static Class make_delegate_class(void) {
 static void launch_learn_app(void) {
     srand((unsigned int)time(NULL));
     make_flipped_view_class();
+    make_graph_view_classes();
     Class delegate_class = make_delegate_class();
 
     id app = msg_id(cls("NSApplication"), "sharedApplication");
