@@ -130,6 +130,7 @@ static int daily_word_attempts = 0;
 static int daily_active_letters[26];
 static int daily_active_letter_count = 0;
 static int glyph_selected_index = -1;
+static int center_alignment_value = -1;
 
 static CGRect rect(double x, double y, double width, double height) {
     CGRect value = {{x, y}, {width, height}};
@@ -352,6 +353,7 @@ static void save_stats(void) {
     for (int i = 0; i < 26; i++) {
         fprintf(file, "%d%c", daily_letter_streaks[i], i == 25 ? '\n' : ' ');
     }
+    fprintf(file, "ALIGNMENT %d\n", center_alignment_value);
 
     fclose(file);
 }
@@ -467,6 +469,15 @@ static void load_stats(void) {
                 }
             }
         }
+    }
+
+    char alignment_label[32];
+    int alignment_value = -1;
+    if (fscanf(file, "%31s %d", alignment_label, &alignment_value) == 2 &&
+        strcmp(alignment_label, "ALIGNMENT") == 0 &&
+        alignment_value >= 0 &&
+        alignment_value <= 2) {
+        center_alignment_value = alignment_value;
     }
 
     fclose(file);
@@ -703,6 +714,17 @@ static id make_label(const char *text, double x, double y, double width, double 
     return field;
 }
 
+static int app_center_alignment(void) {
+    if (center_alignment_value >= 0 && center_alignment_value <= 2) {
+        return center_alignment_value;
+    }
+    return NSTextAlignmentCenter;
+}
+
+static void center_text(id field) {
+    msg_void_int(field, "setAlignment:", app_center_alignment());
+}
+
 static id make_colored_label(
     const char *text,
     double x,
@@ -753,6 +775,7 @@ static void style_button_text(id button, id text_color) {
 }
 
 static void render_home(id self);
+static void render_alignment_calibration(id self);
 static void render_letters(id self);
 static void render_stats(id self);
 static void render_practice_screen(id self);
@@ -760,6 +783,7 @@ static void render_result_screen(id self, int correct);
 static void render_finished_screen(id self);
 static void next_practice(id self, SEL _cmd, id sender);
 static void check_practice(id self, SEL _cmd, id sender);
+static void choose_alignment(id self, SEL _cmd, id sender);
 static void end_practice(id self, SEL _cmd, id sender);
 static void dont_know(id self, SEL _cmd, id sender);
 static void glyph_key_pressed(id self, SEL _cmd, id sender);
@@ -822,7 +846,7 @@ static id make_alphabet_tile(const char *letter, const char *token, double x, do
     snprintf(text, sizeof(text), "%c  %s", (char)toupper((unsigned char)letter[0]), token);
     id title = make_label(text, 10, 86, 120, 24, 15);
     msg_void_id(title, "setTextColor:", color("whiteColor"));
-    msg_void_int(title, "setAlignment:", NSTextAlignmentCenter);
+    center_text(title);
     add_subview(box, title);
 
     return box;
@@ -1047,7 +1071,7 @@ static void add_daily_study_strip(id root) {
         );
         id item = make_label(text, x - 10, 216, 58, 20, 11);
         msg_void_id(item, "setTextColor:", color("whiteColor"));
-        msg_void_int(item, "setAlignment:", NSTextAlignmentCenter);
+        center_text(item);
         add_subview(root, item);
     }
 }
@@ -1087,7 +1111,7 @@ static void render_practice_screen(id self) {
         22
     );
     msg_void_id(prompt, "setTextColor:", color("whiteColor"));
-    msg_void_int(prompt, "setAlignment:", NSTextAlignmentCenter);
+    center_text(prompt);
     add_subview(root, prompt);
     add_daily_study_strip(root);
 
@@ -1108,7 +1132,7 @@ static void render_practice_screen(id self) {
     } else if (current_question_is_word()) {
         id token_label = make_label(current_word_token, 14, 64, 142, 42, 20);
         msg_void_id(token_label, "setTextColor:", color("whiteColor"));
-        msg_void_int(token_label, "setAlignment:", NSTextAlignmentCenter);
+        center_text(token_label);
         add_subview(image_box, token_label);
     } else {
         char letter_text[8];
@@ -1120,7 +1144,7 @@ static void render_practice_screen(id self) {
         );
         id letter_label = make_label(letter_text, 14, 56, 142, 58, 40);
         msg_void_id(letter_label, "setTextColor:", color("whiteColor"));
-        msg_void_int(letter_label, "setAlignment:", NSTextAlignmentCenter);
+        center_text(letter_label);
         add_subview(image_box, letter_label);
     }
 
@@ -1178,29 +1202,29 @@ static void render_result_screen(id self, int correct) {
     const char *status = correct ? "Correct" : "Incorrect";
     id status_label = make_label(status, 555, 300, 330, 52, 32);
     msg_void_id(status_label, "setTextColor:", correct ? color("systemGreenColor") : color("systemRedColor"));
-    msg_void_int(status_label, "setAlignment:", NSTextAlignmentCenter);
+    center_text(status_label);
     add_subview(root, status_label);
 
     if (!correct) {
         id yours = make_label("Your answer:", 610, 390, 220, 28, 18);
         msg_void_id(yours, "setTextColor:", color("whiteColor"));
-        msg_void_int(yours, "setAlignment:", NSTextAlignmentCenter);
+        center_text(yours);
         add_subview(root, yours);
 
         id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", 600, 430, 240, 36, 18);
         msg_void_id(answer_box, "setTextColor:", rgb_color(0.65, 0.65, 0.65, 1.0));
-        msg_void_int(answer_box, "setAlignment:", NSTextAlignmentCenter);
+        center_text(answer_box);
         add_subview(root, answer_box);
 
         id correct_title = make_label("Correct:", 640, 482, 160, 28, 18);
         msg_void_id(correct_title, "setTextColor:", color("whiteColor"));
-        msg_void_int(correct_title, "setAlignment:", NSTextAlignmentCenter);
+        center_text(correct_title);
         add_subview(root, correct_title);
     }
 
     id correct_answer = make_label(last_correct_answer, 560, correct ? 410 : 526, 320, 34, 20);
     msg_void_id(correct_answer, "setTextColor:", color("systemGreenColor"));
-    msg_void_int(correct_answer, "setAlignment:", NSTextAlignmentCenter);
+    center_text(correct_answer);
     add_subview(root, correct_answer);
 
     const char *next_title = current_mode == PRACTICE_DAILY &&
@@ -1221,7 +1245,7 @@ static void render_finished_screen(id self) {
     id root = make_page(APP_HEIGHT);
     id label = make_label("Good Job!\nSee you\nnext time!", 540, 250, 360, 150, 32);
     msg_void_id(label, "setTextColor:", color("systemGreenColor"));
-    msg_void_int(label, "setAlignment:", NSTextAlignmentCenter);
+    center_text(label);
     add_subview(root, label);
 
     id home_button = make_button_sized("Go home", self, selector("showHome:"), 600, 500, 240);
@@ -1397,6 +1421,53 @@ static void render_home(id self) {
     style_button_color(daily_button, 0.05, 0.2, 1.0);
     style_button_text(daily_button, color("whiteColor"));
     add_subview(daily_card, daily_button);
+
+    show_page(root);
+}
+
+static void render_alignment_calibration(id self) {
+    id root = make_page(APP_HEIGHT);
+
+    id title = make_label("Choose centered text", 390, 120, 660, 48, 30);
+    msg_void_id(title, "setTextColor:", color("whiteColor"));
+    center_text(title);
+    add_subview(root, title);
+
+    id subtitle = make_label("Pick the box where the words are centered.", 390, 172, 660, 28, 16);
+    msg_void_id(subtitle, "setTextColor:", color("secondaryLabelColor"));
+    center_text(subtitle);
+    add_subview(root, subtitle);
+
+    for (int i = 0; i < 3; i++) {
+        double x = 270 + i * 310;
+        id card = alloc_init_frame("FlippedTrideroahView", rect(x, 260, 260, 190));
+        style_card(card);
+        add_subview(root, card);
+
+        char heading[32];
+        snprintf(heading, sizeof(heading), "Value %d", i);
+        id value_label = make_label(heading, 20, 18, 220, 26, 18);
+        msg_void_id(value_label, "setTextColor:", color("whiteColor"));
+        msg_void_int(value_label, "setAlignment:", i);
+        add_subview(card, value_label);
+
+        id sample = make_label("Centered?", 20, 76, 220, 42, 24);
+        msg_void_id(sample, "setTextColor:", color("whiteColor"));
+        msg_void_int(sample, "setAlignment:", i);
+        add_subview(card, sample);
+
+        id guide = alloc_init_frame("FlippedTrideroahView", rect(129, 56, 2, 82));
+        msg_void_bool(guide, "setWantsLayer:", YES_VALUE);
+        id guide_layer = msg_id(guide, "layer");
+        msg_void_ptr(guide_layer, "setBackgroundColor:", rgb_cg_color(0.0, 1.0, 0.0, 0.7));
+        add_subview(card, guide);
+
+        id button = make_button_sized("Choose", self, selector("chooseAlignment:"), x + 50, 490, 160);
+        ((void (*)(id, SEL, long))objc_msgSend)(button, selector("setTag:"), (long)i);
+        style_button_color(button, 0.05, 0.2, 1.0);
+        style_button_text(button, color("whiteColor"));
+        add_subview(root, button);
+    }
 
     show_page(root);
 }
@@ -1751,7 +1822,11 @@ static void show_home(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
     load_stats();
-    render_home(self);
+    if (center_alignment_value < 0 || center_alignment_value > 2) {
+        render_alignment_calibration(self);
+    } else {
+        render_home(self);
+    }
 }
 
 static void show_letters(id self, SEL _cmd, id sender) {
@@ -1764,6 +1839,17 @@ static void show_stats(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
     render_stats(self);
+}
+
+static void choose_alignment(id self, SEL _cmd, id sender) {
+    (void)_cmd;
+    long tag = ((long (*)(id, SEL))objc_msgSend)(sender, selector("tag"));
+    if (tag < 0 || tag > 2) {
+        return;
+    }
+    center_alignment_value = (int)tag;
+    save_stats();
+    render_home(self);
 }
 
 static void glyph_key_pressed(id self, SEL _cmd, id sender) {
@@ -1936,6 +2022,7 @@ static Class make_delegate_class(void) {
             "c@:@"
         );
         class_addMethod(delegate_class, selector("checkPractice:"), (IMP)check_practice, "v@:@");
+        class_addMethod(delegate_class, selector("chooseAlignment:"), (IMP)choose_alignment, "v@:@");
         class_addMethod(delegate_class, selector("dontKnow:"), (IMP)dont_know, "v@:@");
         class_addMethod(delegate_class, selector("glyphKeyPressed:"), (IMP)glyph_key_pressed, "v@:@");
         class_addMethod(delegate_class, selector("nextPractice:"), (IMP)next_practice, "v@:@");

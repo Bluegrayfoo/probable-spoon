@@ -2,7 +2,7 @@
 
 A small macOS learning app written in C. It opens a native AppKit window and displays the Trideroah glyph assets from `assets/Assets.xcassets`.
 
-Includes letters practice, words practice, stats, and a 15-question Daily Practice mode that unlocks harder problem types as progress is saved.
+Includes letters practice, words practice, stats, and a 15-question Daily Practice mode that unlocks harder problem types as progress is saved. On first launch, the app asks which text-alignment value is centered on that Mac and saves the choice.
 
 ## Build
 
