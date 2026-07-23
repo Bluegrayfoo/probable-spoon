@@ -41,16 +41,14 @@ enum {
     NSBackingStoreBuffered = 2,
     NSApplicationActivationPolicyRegular = 0,
     NSImageScaleProportionallyUpOrDown = 3,
-    NSTextAlignmentCenter = 1,
+    NSTextAlignmentCenter = 2,
     NSFocusRingTypeDefault = 0,
     NSViewWidthSizable = 1 << 1,
-    NSViewHeightSizable = 1 << 4,
-    NSWindowCollectionBehaviorFullScreenPrimary = 1 << 7
+    NSViewHeightSizable = 1 << 4
 };
 
-#define APP_WIDTH 2048.0
-#define APP_HEIGHT 1280.0
-#define BUTTON_HEIGHT 54.0
+#define APP_WIDTH 1440.0
+#define APP_HEIGHT 900.0
 
 typedef struct {
     const char *letter;
@@ -60,15 +58,25 @@ typedef struct {
 typedef enum {
     PRACTICE_NONE = 0,
     PRACTICE_LETTERS = 1,
-    PRACTICE_WORDS = 2
+    PRACTICE_WORDS = 2,
+    PRACTICE_DAILY = 3
 } PracticeMode;
+
+typedef enum {
+    DAILY_TOKEN_TO_ENGLISH = 0,
+    DAILY_ENGLISH_TO_TOKEN = 1,
+    DAILY_WORD_TO_ENGLISH = 2,
+    DAILY_GLYPH_TO_ENGLISH = 3,
+    DAILY_ENGLISH_TO_GLYPH = 4
+} DailyQuestionKind;
 
 #define MAX_RESULTS 64
 #define LETTER_SUITABLE_SECONDS 3.0
 #define WORD_BASE_SUITABLE_SECONDS 1.5
 #define WORD_SECONDS_PER_LETTER 0.75
 #define MAX_WORD_LENGTH 12
-#define PRACTICE_SESSION_LIMIT 10
+#define DAILY_SESSION_LIMIT 15
+#define ALL_LETTERS_MASK ((1u << 26) - 1u)
 
 static const char *fallback_asset_root =
     "/Users/tristan/Desktop/skill building/technical/coding/Tristan/Apps/Translation/Translation/Assets.xcassets";
@@ -111,6 +119,17 @@ static int session_answer_count = 0;
 static char last_user_answer[128];
 static char last_correct_answer[128];
 static int last_answer_correct = 0;
+static DailyQuestionKind daily_questions[DAILY_SESSION_LIMIT];
+static DailyQuestionKind current_daily_kind = DAILY_TOKEN_TO_ENGLISH;
+static unsigned int daily_seen_letters = 0;
+static unsigned int daily_mastered_letters = 0;
+static unsigned int daily_glyph_seen_letters = 0;
+static int daily_letter_streaks[26];
+static int daily_word_correct = 0;
+static int daily_word_attempts = 0;
+static int daily_active_letters[26];
+static int daily_active_letter_count = 0;
+static int glyph_selected_index = -1;
 
 static CGRect rect(double x, double y, double width, double height) {
     CGRect value = {{x, y}, {width, height}};
@@ -168,54 +187,6 @@ static id alloc_init_frame(const char *class_name, CGRect frame) {
     return ((id (*)(id, SEL, CGRect))objc_msgSend)(
         object, selector("initWithFrame:"), frame
     );
-}
-
-static CGRect window_content_rect(void) {
-    if (window_ref) {
-        CGRect content_rect = ((CGRect (*)(id, SEL))objc_msgSend)(
-            window_ref,
-            selector("contentLayoutRect")
-        );
-        if (content_rect.size.width > 1.0 && content_rect.size.height > 1.0) {
-            return rect(0, 0, content_rect.size.width, content_rect.size.height);
-        }
-    }
-    return rect(0, 0, APP_WIDTH, APP_HEIGHT);
-}
-
-static void scroll_clip_to_origin(void) {
-    id content_view = msg_id(scroll_ref, "contentView");
-    if (content_view) {
-        ((void (*)(id, SEL, CGPoint))objc_msgSend)(
-            content_view,
-            selector("scrollToPoint:"),
-            (CGPoint){0.0, 0.0}
-        );
-        msg_void_id(scroll_ref, "reflectScrolledClipView:", content_view);
-    }
-}
-
-static void scroll_view_to_right(id scroll_view, double content_width, double visible_width) {
-    id content_view = msg_id(scroll_view, "contentView");
-    if (!content_view) {
-        return;
-    }
-
-    double x = content_width - visible_width;
-    if (x < 0.0) {
-        x = 0.0;
-    }
-
-    ((void (*)(id, SEL, CGPoint))objc_msgSend)(
-        content_view,
-        selector("scrollToPoint:"),
-        (CGPoint){x, 0.0}
-    );
-    msg_void_id(scroll_view, "reflectScrolledClipView:", content_view);
-}
-
-static void set_view_frame(id view, CGRect frame) {
-    ((void (*)(id, SEL, CGRect))objc_msgSend)(view, selector("setFrame:"), frame);
 }
 
 static id font(double size) {
@@ -278,130 +249,6 @@ static double clamp_double(double value, double min_value, double max_value) {
     return value;
 }
 
-static void stats_path(char *buffer, size_t size) {
-    const char *home = getenv("HOME");
-    if (home && *home) {
-        snprintf(buffer, size, "%s/.trideroah_stats", home);
-        return;
-    }
-    snprintf(buffer, size, ".trideroah_stats");
-}
-
-static void save_stats(void) {
-    char path[PATH_MAX];
-    stats_path(path, sizeof(path));
-
-    FILE *file = fopen(path, "w");
-    if (!file) {
-        return;
-    }
-
-    fprintf(file, "TRIDEROAH_STATS 1\n");
-    fprintf(file, "COUNTS %d %d\n", letters_practiced, words_practiced);
-    fprintf(file, "LETTERS %d\n", letter_time_count);
-    for (int i = 0; i < letter_time_count; i++) {
-        fprintf(file, "%d %.17g %d\n", letter_items[i], letter_times[i], letter_failed[i]);
-    }
-
-    fprintf(file, "WORDS %d\n", word_time_count);
-    for (int i = 0; i < word_time_count; i++) {
-        fprintf(
-            file,
-            "%d %.17g %d %.17g %s\n",
-            word_items[i],
-            word_times[i],
-            word_failed[i],
-            word_thresholds[i],
-            word_labels[i]
-        );
-    }
-
-    fclose(file);
-}
-
-static int read_section(FILE *file, const char *expected, int *count) {
-    char label[32];
-    if (fscanf(file, "%31s %d", label, count) != 2) {
-        return 0;
-    }
-    if (strcmp(label, expected) != 0) {
-        return 0;
-    }
-    if (*count < 0) {
-        *count = 0;
-    }
-    if (*count > MAX_RESULTS) {
-        *count = MAX_RESULTS;
-    }
-    return 1;
-}
-
-static void load_stats(void) {
-    char path[PATH_MAX];
-    stats_path(path, sizeof(path));
-
-    FILE *file = fopen(path, "r");
-    if (!file) {
-        return;
-    }
-
-    char header[32];
-    int version = 0;
-    if (fscanf(file, "%31s %d", header, &version) != 2 ||
-        strcmp(header, "TRIDEROAH_STATS") != 0 ||
-        version != 1) {
-        fclose(file);
-        return;
-    }
-
-    char counts_label[32];
-    if (fscanf(file, "%31s %d %d", counts_label, &letters_practiced, &words_practiced) != 3 ||
-        strcmp(counts_label, "COUNTS") != 0) {
-        fclose(file);
-        return;
-    }
-    if (letters_practiced < 0) {
-        letters_practiced = 0;
-    }
-    if (words_practiced < 0) {
-        words_practiced = 0;
-    }
-
-    if (!read_section(file, "LETTERS", &letter_time_count)) {
-        fclose(file);
-        return;
-    }
-    for (int i = 0; i < letter_time_count; i++) {
-        if (fscanf(file, "%d %lf %d", &letter_items[i], &letter_times[i], &letter_failed[i]) != 3) {
-            letter_time_count = i;
-            fclose(file);
-            return;
-        }
-    }
-
-    if (!read_section(file, "WORDS", &word_time_count)) {
-        fclose(file);
-        return;
-    }
-    for (int i = 0; i < word_time_count; i++) {
-        if (fscanf(
-            file,
-            "%d %lf %d %lf %12s",
-            &word_items[i],
-            &word_times[i],
-            &word_failed[i],
-            &word_thresholds[i],
-            word_labels[i]
-        ) != 5) {
-            word_time_count = i;
-            fclose(file);
-            return;
-        }
-    }
-
-    fclose(file);
-}
-
 static void store_result(
     double *times,
     int *items,
@@ -455,6 +302,176 @@ static double suitable_seconds_for_word(const char *word) {
     return WORD_BASE_SUITABLE_SECONDS + (double)strlen(word) * WORD_SECONDS_PER_LETTER;
 }
 
+static void stats_path(char *buffer, size_t size) {
+    const char *home = getenv("HOME");
+    if (home && *home) {
+        snprintf(buffer, size, "%s/.trideroah_stats", home);
+        return;
+    }
+    snprintf(buffer, size, ".trideroah_stats");
+}
+
+static void save_stats(void) {
+    char path[PATH_MAX];
+    stats_path(path, sizeof(path));
+
+    FILE *file = fopen(path, "w");
+    if (!file) {
+        return;
+    }
+
+    fprintf(file, "TRIDEROAH_STATS 2\n");
+    fprintf(file, "COUNTS %d %d\n", letters_practiced, words_practiced);
+    fprintf(file, "LETTERS %d\n", letter_time_count);
+    for (int i = 0; i < letter_time_count; i++) {
+        fprintf(file, "%d %.17g %d\n", letter_items[i], letter_times[i], letter_failed[i]);
+    }
+
+    fprintf(file, "WORDS %d\n", word_time_count);
+    for (int i = 0; i < word_time_count; i++) {
+        fprintf(
+            file,
+            "%d %.17g %d %.17g %s\n",
+            word_items[i],
+            word_times[i],
+            word_failed[i],
+            word_thresholds[i],
+            word_labels[i]
+        );
+    }
+
+    fprintf(
+        file,
+        "DAILY %u %u %u %d %d\n",
+        daily_seen_letters,
+        daily_mastered_letters,
+        daily_glyph_seen_letters,
+        daily_word_correct,
+        daily_word_attempts
+    );
+    for (int i = 0; i < 26; i++) {
+        fprintf(file, "%d%c", daily_letter_streaks[i], i == 25 ? '\n' : ' ');
+    }
+
+    fclose(file);
+}
+
+static int read_section(FILE *file, const char *expected, int *count) {
+    char label[32];
+    if (fscanf(file, "%31s %d", label, count) != 2) {
+        return 0;
+    }
+    if (strcmp(label, expected) != 0) {
+        return 0;
+    }
+    if (*count < 0) {
+        *count = 0;
+    }
+    if (*count > MAX_RESULTS) {
+        *count = MAX_RESULTS;
+    }
+    return 1;
+}
+
+static void load_stats(void) {
+    char path[PATH_MAX];
+    stats_path(path, sizeof(path));
+
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        return;
+    }
+
+    char header[32];
+    int version = 0;
+    if (fscanf(file, "%31s %d", header, &version) != 2 ||
+        strcmp(header, "TRIDEROAH_STATS") != 0 ||
+        version < 1 ||
+        version > 2) {
+        fclose(file);
+        return;
+    }
+
+    char counts_label[32];
+    if (fscanf(file, "%31s %d %d", counts_label, &letters_practiced, &words_practiced) != 3 ||
+        strcmp(counts_label, "COUNTS") != 0) {
+        fclose(file);
+        return;
+    }
+    if (letters_practiced < 0) {
+        letters_practiced = 0;
+    }
+    if (words_practiced < 0) {
+        words_practiced = 0;
+    }
+
+    if (!read_section(file, "LETTERS", &letter_time_count)) {
+        fclose(file);
+        return;
+    }
+    for (int i = 0; i < letter_time_count; i++) {
+        if (fscanf(file, "%d %lf %d", &letter_items[i], &letter_times[i], &letter_failed[i]) != 3) {
+            letter_time_count = i;
+            fclose(file);
+            return;
+        }
+    }
+
+    if (!read_section(file, "WORDS", &word_time_count)) {
+        fclose(file);
+        return;
+    }
+    for (int i = 0; i < word_time_count; i++) {
+        if (fscanf(
+            file,
+            "%d %lf %d %lf %12s",
+            &word_items[i],
+            &word_times[i],
+            &word_failed[i],
+            &word_thresholds[i],
+            word_labels[i]
+        ) != 5) {
+            word_time_count = i;
+            fclose(file);
+            return;
+        }
+    }
+
+    if (version >= 2) {
+        char daily_label[32];
+        if (fscanf(
+            file,
+            "%31s %u %u %u %d %d",
+            daily_label,
+            &daily_seen_letters,
+            &daily_mastered_letters,
+            &daily_glyph_seen_letters,
+            &daily_word_correct,
+            &daily_word_attempts
+        ) == 6 && strcmp(daily_label, "DAILY") == 0) {
+            daily_seen_letters &= ALL_LETTERS_MASK;
+            daily_mastered_letters &= ALL_LETTERS_MASK;
+            daily_glyph_seen_letters &= ALL_LETTERS_MASK;
+            if (daily_word_correct < 0) {
+                daily_word_correct = 0;
+            }
+            if (daily_word_attempts < 0) {
+                daily_word_attempts = 0;
+            }
+            for (int i = 0; i < 26; i++) {
+                if (fscanf(file, "%d", &daily_letter_streaks[i]) != 1) {
+                    daily_letter_streaks[i] = 0;
+                }
+                if (daily_letter_streaks[i] < 0) {
+                    daily_letter_streaks[i] = 0;
+                }
+            }
+        }
+    }
+
+    fclose(file);
+}
+
 static const char *token_for_letter_char(char letter) {
     int index = letter - 'a';
     if (index < 0 || index >= 26) {
@@ -497,6 +514,127 @@ static void random_word(char *buffer, size_t size) {
         buffer[i] = (char)('a' + rand() % 26);
     }
     buffer[length] = '\0';
+}
+
+static int all_daily_letters_seen(void) {
+    return (daily_seen_letters & ALL_LETTERS_MASK) == ALL_LETTERS_MASK;
+}
+
+static int all_daily_letters_mastered(void) {
+    return (daily_mastered_letters & ALL_LETTERS_MASK) == ALL_LETTERS_MASK;
+}
+
+static int daily_glyph_stage_unlocked(void) {
+    return all_daily_letters_mastered() && daily_word_correct >= 30;
+}
+
+static void daily_add_question(DailyQuestionKind kind, int *count) {
+    if (*count < DAILY_SESSION_LIMIT) {
+        daily_questions[*count] = kind;
+        *count += 1;
+    }
+}
+
+static void shuffle_daily_questions(void) {
+    for (int i = DAILY_SESSION_LIMIT - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        DailyQuestionKind temp = daily_questions[i];
+        daily_questions[i] = daily_questions[j];
+        daily_questions[j] = temp;
+    }
+}
+
+static void choose_daily_active_letters(unsigned int mask, int max_count, int mark_seen, int mark_glyph_seen) {
+    daily_active_letter_count = 0;
+    for (int i = 0; i < 26 && daily_active_letter_count < max_count; i++) {
+        if ((mask & (1u << i)) != 0u) {
+            daily_active_letters[daily_active_letter_count++] = i;
+            if (mark_seen) {
+                daily_seen_letters |= (1u << i);
+            }
+            if (mark_glyph_seen) {
+                daily_glyph_seen_letters |= (1u << i);
+            }
+        }
+    }
+
+    if (daily_active_letter_count == 0) {
+        for (int i = 0; i < 26 && daily_active_letter_count < max_count; i++) {
+            daily_active_letters[daily_active_letter_count++] = i;
+        }
+    }
+}
+
+static int pick_daily_letter_index(void) {
+    if (daily_active_letter_count > 0) {
+        return daily_active_letters[rand() % daily_active_letter_count];
+    }
+
+    unsigned int weak_mask = (~daily_mastered_letters) & ALL_LETTERS_MASK;
+    if (weak_mask != 0u && rand() % 2 == 0) {
+        int choices[26];
+        int count = 0;
+        for (int i = 0; i < 26; i++) {
+            if ((weak_mask & (1u << i)) != 0u) {
+                choices[count++] = i;
+            }
+        }
+        if (count > 0) {
+            return choices[rand() % count];
+        }
+    }
+
+    return rand() % 26;
+}
+
+static int daily_word_question_count(void) {
+    if (!all_daily_letters_mastered()) {
+        return 0;
+    }
+
+    int word_count = 1 + daily_word_correct / 5;
+    if (word_count > 7) {
+        word_count = 7;
+    }
+    return word_count;
+}
+
+static void prepare_daily_session(void) {
+    int count = 0;
+    glyph_selected_index = -1;
+    word_length_min = 3;
+    word_length_max = 9;
+
+    if (!all_daily_letters_seen()) {
+        choose_daily_active_letters((~daily_seen_letters) & ALL_LETTERS_MASK, 5, 1, 0);
+        for (int i = 0; i < 8; i++) {
+            daily_add_question(DAILY_ENGLISH_TO_TOKEN, &count);
+        }
+        for (int i = 0; i < 7; i++) {
+            daily_add_question(DAILY_TOKEN_TO_ENGLISH, &count);
+        }
+    } else {
+        daily_active_letter_count = 0;
+        int word_count = daily_word_question_count();
+        int glyph_count = daily_glyph_stage_unlocked() ? 4 : 0;
+
+        if (glyph_count > 0 && (daily_glyph_seen_letters & ALL_LETTERS_MASK) != ALL_LETTERS_MASK) {
+            choose_daily_active_letters((~daily_glyph_seen_letters) & ALL_LETTERS_MASK, 5, 0, 1);
+        }
+
+        for (int i = 0; i < word_count; i++) {
+            daily_add_question(DAILY_WORD_TO_ENGLISH, &count);
+        }
+        for (int i = 0; i < glyph_count; i++) {
+            daily_add_question(i % 2 == 0 ? DAILY_ENGLISH_TO_GLYPH : DAILY_GLYPH_TO_ENGLISH, &count);
+        }
+        while (count < DAILY_SESSION_LIMIT) {
+            daily_add_question(count % 2 == 0 ? DAILY_ENGLISH_TO_TOKEN : DAILY_TOKEN_TO_ENGLISH, &count);
+        }
+    }
+
+    shuffle_daily_questions();
+    save_stats();
 }
 
 static int directory_exists(const char *path) {
@@ -580,15 +718,7 @@ static id make_colored_label(
 }
 
 static id make_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    id button = alloc_init_frame("NSButton", rect(x, y, width, BUTTON_HEIGHT));
-    msg_void_id(button, "setTitle:", ns_string(title));
-    msg_void_id(button, "setTarget:", target);
-    ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
-    return button;
-}
-
-static id make_large_button_sized(const char *title, id target, SEL action, double x, double y, double width) {
-    id button = alloc_init_frame("NSButton", rect(x, y, width, BUTTON_HEIGHT));
+    id button = alloc_init_frame("NSButton", rect(x, y, width, 54));
     msg_void_id(button, "setTitle:", ns_string(title));
     msg_void_id(button, "setTarget:", target);
     ((void (*)(id, SEL, SEL))objc_msgSend)(button, selector("setAction:"), action);
@@ -615,8 +745,7 @@ static void style_button_color(id button, double red, double green, double blue)
     msg_void_bool(button, "setBordered:", NO_VALUE);
     id layer = msg_id(button, "layer");
     msg_void_ptr(layer, "setBackgroundColor:", rgb_cg_color(red, green, blue, 1.0));
-    msg_void_double(layer, "setCornerRadius:", BUTTON_HEIGHT / 2.0);
-    msg_void_bool(layer, "setMasksToBounds:", YES_VALUE);
+    msg_void_double(layer, "setCornerRadius:", 16.0);
 }
 
 static void style_button_text(id button, id text_color) {
@@ -633,6 +762,8 @@ static void next_practice(id self, SEL _cmd, id sender);
 static void check_practice(id self, SEL _cmd, id sender);
 static void end_practice(id self, SEL _cmd, id sender);
 static void dont_know(id self, SEL _cmd, id sender);
+static void glyph_key_pressed(id self, SEL _cmd, id sender);
+static void start_daily(id self, SEL _cmd, id sender);
 static void start_words_any(id self, SEL _cmd, id sender);
 static void start_words_short(id self, SEL _cmd, id sender);
 static void start_words_medium(id self, SEL _cmd, id sender);
@@ -645,21 +776,7 @@ static id make_page(double height) {
 }
 
 static void show_page(id page) {
-    CGRect content_rect = window_content_rect();
-    set_view_frame(scroll_ref, content_rect);
-    msg_void_int(scroll_ref, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
-    msg_void_id(window_ref, "setContentView:", scroll_ref);
-    msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
-    msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_id(scroll_ref, "setDocumentView:", page);
-    scroll_clip_to_origin();
-}
-
-static void show_focus_page(id page) {
-    CGRect content_rect = window_content_rect();
-    set_view_frame(page, content_rect);
-    msg_void_int(page, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
-    msg_void_id(window_ref, "setContentView:", page);
 }
 
 static void add_tabs(id root, id self, int active_tab) {
@@ -751,11 +868,115 @@ static int pick_sticky_word(char *buffer, size_t size) {
     return 1;
 }
 
+static int current_question_is_word(void) {
+    return current_mode == PRACTICE_WORDS ||
+        (current_mode == PRACTICE_DAILY && current_daily_kind == DAILY_WORD_TO_ENGLISH);
+}
+
+static int current_question_uses_glyph_image(void) {
+    return current_mode == PRACTICE_LETTERS ||
+        (current_mode == PRACTICE_DAILY &&
+            (current_daily_kind == DAILY_TOKEN_TO_ENGLISH ||
+             current_daily_kind == DAILY_GLYPH_TO_ENGLISH));
+}
+
+static int current_question_uses_glyph_keyboard(void) {
+    return current_mode == PRACTICE_DAILY && current_daily_kind == DAILY_ENGLISH_TO_GLYPH;
+}
+
+static void normalize_answer(const char *answer, char *buffer, size_t size) {
+    while (*answer != '\0' && isspace((unsigned char)*answer)) {
+        answer++;
+    }
+
+    size_t length = strlen(answer);
+    while (length > 0 && isspace((unsigned char)answer[length - 1])) {
+        length--;
+    }
+    if (length >= size) {
+        length = size - 1;
+    }
+
+    for (size_t i = 0; i < length; i++) {
+        buffer[i] = (char)tolower((unsigned char)answer[i]);
+    }
+    buffer[length] = '\0';
+}
+
+static void current_correct_display(char *buffer, size_t size) {
+    if (current_question_is_word()) {
+        snprintf(buffer, size, "%s", current_word);
+    } else if (current_mode == PRACTICE_DAILY && current_daily_kind == DAILY_ENGLISH_TO_TOKEN) {
+        snprintf(buffer, size, "%s", letter_map[current_index].token);
+    } else {
+        snprintf(
+            buffer,
+            size,
+            "%c",
+            (char)toupper((unsigned char)letter_map[current_index].letter[0])
+        );
+    }
+}
+
+static int answer_is_correct(const char *answer) {
+    char normalized[128];
+    normalize_answer(answer, normalized, sizeof(normalized));
+
+    if (current_question_is_word()) {
+        return strcmp(normalized, current_word) == 0;
+    }
+
+    if (current_mode == PRACTICE_DAILY && current_daily_kind == DAILY_ENGLISH_TO_TOKEN) {
+        return strcmp(normalized, letter_map[current_index].token) == 0;
+    }
+
+    if (current_question_uses_glyph_keyboard()) {
+        return glyph_selected_index == current_index;
+    }
+
+    return normalized[0] == letter_map[current_index].letter[0] && normalized[1] == '\0';
+}
+
+static void record_daily_progress(int correct) {
+    if (current_mode != PRACTICE_DAILY) {
+        return;
+    }
+
+    if (current_question_is_word()) {
+        daily_word_attempts++;
+        if (correct) {
+            daily_word_correct++;
+        }
+        return;
+    }
+
+    if (current_index < 0 || current_index >= 26) {
+        return;
+    }
+
+    if (correct) {
+        daily_letter_streaks[current_index]++;
+        if (daily_letter_streaks[current_index] >= 3) {
+            daily_mastered_letters |= (1u << current_index);
+        }
+    } else {
+        daily_letter_streaks[current_index] = 0;
+        daily_mastered_letters &= ~(1u << current_index);
+    }
+}
+
 static void generate_question(char *prompt, size_t prompt_size) {
     question_started_at = now_seconds();
     awaiting_answer = 1;
+    glyph_selected_index = -1;
 
-    if (current_mode == PRACTICE_WORDS) {
+    if (current_mode == PRACTICE_DAILY) {
+        current_daily_kind = daily_questions[session_answer_count];
+    }
+
+    if (current_question_is_word()) {
+        word_length_min = 3;
+        word_length_max = 9;
         if (rand() % 3 != 0 || !pick_sticky_word(current_word, sizeof(current_word))) {
             random_word(current_word, sizeof(current_word));
         }
@@ -767,216 +988,253 @@ static void generate_question(char *prompt, size_t prompt_size) {
             current_word_token
         );
     } else {
-        current_index = rand() % (int)(sizeof(letter_map) / sizeof(letter_map[0]));
+        current_index = current_mode == PRACTICE_DAILY ? pick_daily_letter_index() : rand() % 26;
         if (practice_image) {
             msg_void_id(practice_image, "setImage:", image_for_letter(letter_map[current_index].letter));
         }
+        if (current_mode == PRACTICE_DAILY && current_daily_kind == DAILY_ENGLISH_TO_TOKEN) {
+            snprintf(
+                prompt,
+                prompt_size,
+                "What Trideroah token makes '%c'?",
+                (char)toupper((unsigned char)letter_map[current_index].letter[0])
+            );
+        } else if (current_mode == PRACTICE_DAILY && current_daily_kind == DAILY_ENGLISH_TO_GLYPH) {
+            snprintf(
+                prompt,
+                prompt_size,
+                "Tap the glyph for '%c'.",
+                (char)toupper((unsigned char)letter_map[current_index].letter[0])
+            );
+        } else if (current_mode == PRACTICE_DAILY && current_daily_kind == DAILY_GLYPH_TO_ENGLISH) {
+            snprintf(prompt, prompt_size, "Which English letter is this glyph?");
+        } else {
+            snprintf(
+                prompt,
+                prompt_size,
+                "Which English letter makes '%s'?",
+                letter_map[current_index].token
+            );
+        }
+    }
+}
+
+static void add_daily_study_strip(id root) {
+    if (current_mode != PRACTICE_DAILY || daily_active_letter_count <= 0) {
+        return;
+    }
+
+    id label = make_label("Today", 470, 188, 90, 24, 14);
+    msg_void_id(label, "setTextColor:", color("secondaryLabelColor"));
+    add_subview(root, label);
+
+    for (int i = 0; i < daily_active_letter_count; i++) {
+        int index = daily_active_letters[i];
+        double x = 548 + i * 78;
+
+        id image_view = alloc_init_frame("NSImageView", rect(x, 178, 36, 36));
+        msg_void_id(image_view, "setImage:", image_for_letter(letter_map[index].letter));
+        msg_void_int(image_view, "setImageScaling:", NSImageScaleProportionallyUpOrDown);
+        add_subview(root, image_view);
+
+        char text[24];
         snprintf(
-            prompt,
-            prompt_size,
-            "Which English letter makes '%s'?",
-            letter_map[current_index].token
+            text,
+            sizeof(text),
+            "%c %s",
+            (char)toupper((unsigned char)letter_map[index].letter[0]),
+            letter_map[index].token
         );
+        id item = make_label(text, x - 10, 216, 58, 20, 11);
+        msg_void_id(item, "setTextColor:", color("whiteColor"));
+        msg_void_int(item, "setAlignment:", NSTextAlignmentCenter);
+        add_subview(root, item);
+    }
+}
+
+static void add_glyph_keyboard(id root, id self) {
+    int columns = 13;
+    double size = 38.0;
+    double gap = 8.0;
+    double start_x = 406.0;
+    double start_y = 512.0;
+
+    for (int i = 0; i < 26; i++) {
+        int row = i / columns;
+        int column = i % columns;
+        id button = make_button_sized("", self, selector("glyphKeyPressed:"), start_x + column * (size + gap), start_y + row * (size + gap), size);
+        msg_void_id(button, "setImage:", image_for_letter(letter_map[i].letter));
+        ((void (*)(id, SEL, long))objc_msgSend)(button, selector("setTag:"), (long)i);
+        add_subview(root, button);
     }
 }
 
 static void render_practice_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    CGRect content_rect = window_content_rect();
-    double page_width = content_rect.size.width;
-    double page_height = content_rect.size.height;
-    set_view_frame(root, rect(0, 0, page_width, page_height));
-
-    double panel_width = 640.0;
-    double panel_height = 500.0;
-    double left = (page_width - panel_width) / 2.0;
-    double top = (page_height - panel_height) / 2.0;
-    if (left < 24.0) {
-        left = 24.0;
+    if (current_mode == PRACTICE_DAILY) {
+        current_daily_kind = daily_questions[session_answer_count];
     }
-    if (top < 80.0) {
-        top = 80.0;
-    }
-
-    id panel = alloc_init_frame("FlippedTrideroahView", rect(left, top, panel_width, panel_height));
-    add_subview(root, panel);
-
     char prompt_text[256];
     generate_question(prompt_text, sizeof(prompt_text));
+    int uses_glyph_keyboard = current_question_uses_glyph_keyboard();
 
     id prompt = make_label(
         prompt_text,
-        0,
-        0,
-        panel_width,
+        470,
+        330,
+        500,
         34,
         22
     );
     msg_void_id(prompt, "setTextColor:", color("whiteColor"));
     msg_void_int(prompt, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(panel, prompt);
+    add_subview(root, prompt);
+    add_daily_study_strip(root);
 
-    id image_box = alloc_init_frame("FlippedTrideroahView", rect(0, 90, 230, 230));
+    id image_box = alloc_init_frame("FlippedTrideroahView", rect(480, 395, 170, 170));
     msg_void_bool(image_box, "setWantsLayer:", YES_VALUE);
     id image_layer = msg_id(image_box, "layer");
     msg_void_ptr(image_layer, "setBackgroundColor:", rgb_cg_color(0.0, 0.0, 0.0, 1.0));
     msg_void_ptr(image_layer, "setBorderColor:", cg_color("whiteColor"));
     msg_void_double(image_layer, "setBorderWidth:", 4.0);
     msg_void_double(image_layer, "setCornerRadius:", 1.0);
-    add_subview(panel, image_box);
+    add_subview(root, image_box);
 
-    if (current_mode == PRACTICE_LETTERS) {
-        practice_image = alloc_init_frame("NSImageView", rect(30, 30, 170, 170));
+    if (current_question_uses_glyph_image()) {
+        practice_image = alloc_init_frame("NSImageView", rect(25, 25, 120, 120));
         msg_void_int(practice_image, "setImageScaling:", NSImageScaleProportionallyUpOrDown);
         msg_void_id(practice_image, "setImage:", image_for_letter(letter_map[current_index].letter));
         add_subview(image_box, practice_image);
-    } else {
-        id token_label = make_label(current_word_token, 20, 92, 190, 46, 22);
+    } else if (current_question_is_word()) {
+        id token_label = make_label(current_word_token, 14, 64, 142, 42, 20);
         msg_void_id(token_label, "setTextColor:", color("whiteColor"));
         msg_void_int(token_label, "setAlignment:", NSTextAlignmentCenter);
         add_subview(image_box, token_label);
+    } else {
+        char letter_text[8];
+        snprintf(
+            letter_text,
+            sizeof(letter_text),
+            "%c",
+            (char)toupper((unsigned char)letter_map[current_index].letter[0])
+        );
+        id letter_label = make_label(letter_text, 14, 56, 142, 58, 40);
+        msg_void_id(letter_label, "setTextColor:", color("whiteColor"));
+        msg_void_int(letter_label, "setAlignment:", NSTextAlignmentCenter);
+        add_subview(image_box, letter_label);
     }
 
-    practice_answer = alloc_init_frame("NSTextField", rect(310, 135, 330, 72));
+    practice_answer = alloc_init_frame("NSTextField", rect(710, 430, 250, 56));
     msg_void_id(
         practice_answer,
         "setPlaceholderString:",
-        ns_string(current_mode == PRACTICE_WORDS ? "Answer goes here..." : "Answer goes here...")
+        ns_string(uses_glyph_keyboard ? "Tap a glyph below..." : "Answer goes here...")
     );
     msg_void_id(practice_answer, "setFont:", font(20));
     msg_void_id(practice_answer, "setTextColor:", color("whiteColor"));
     msg_void_id(practice_answer, "setBackgroundColor:", color("blackColor"));
     msg_void_bool(practice_answer, "setDrawsBackground:", YES_VALUE);
-    msg_void_bool(practice_answer, "setEditable:", YES_VALUE);
+    msg_void_bool(practice_answer, "setEditable:", uses_glyph_keyboard ? NO_VALUE : YES_VALUE);
     msg_void_bool(practice_answer, "setSelectable:", YES_VALUE);
     msg_void_bool(practice_answer, "setEnabled:", YES_VALUE);
     msg_void_bool(practice_answer, "setBezeled:", YES_VALUE);
-    msg_void_int(practice_answer, "setFocusRingType:", NSFocusRingTypeDefault);
     msg_void_id(practice_answer, "setTarget:", self);
     ((void (*)(id, SEL, SEL))objc_msgSend)(
         practice_answer,
         selector("setAction:"),
         selector("checkPractice:")
     );
-    add_subview(panel, practice_answer);
+    add_subview(root, practice_answer);
 
-    id check_button = make_large_button_sized("Check", self, selector("checkPractice:"), 0, 360, 310);
+    if (uses_glyph_keyboard) {
+        add_glyph_keyboard(root, self);
+    }
+
+    double button_y = uses_glyph_keyboard ? 620.0 : 600.0;
+    double exit_y = uses_glyph_keyboard ? 690.0 : 670.0;
+
+    id check_button = make_button_sized("Check", self, selector("checkPractice:"), 480, button_y, 210);
     style_button_color(check_button, 0.0, 1.0, 0.0);
     style_button_text(check_button, color("blackColor"));
-    add_subview(panel, check_button);
+    add_subview(root, check_button);
 
-    id dont_button = make_large_button_sized("Don't know", self, selector("dontKnow:"), 330, 360, 310);
+    id dont_button = make_button_sized("Don't know", self, selector("dontKnow:"), 710, button_y, 210);
     style_button_color(dont_button, 1.0, 0.12, 0.02);
     style_button_text(dont_button, color("whiteColor"));
-    add_subview(panel, dont_button);
+    add_subview(root, dont_button);
 
-    id exit_button = make_large_button_sized("Save and exit", self, selector("endPractice:"), 0, 455, 640);
+    id exit_button = make_button_sized("Save and exit", self, selector("endPractice:"), 480, exit_y, 440);
     style_button_color(exit_button, 0.05, 0.2, 1.0);
     style_button_text(exit_button, color("whiteColor"));
-    add_subview(panel, exit_button);
+    add_subview(root, exit_button);
 
-    show_focus_page(root);
+    show_page(root);
     msg_void_id(window_ref, "makeFirstResponder:", practice_answer);
     msg_void_id(practice_answer, "selectText:", NULL);
 }
 
 static void render_result_screen(id self, int correct) {
     id root = make_page(APP_HEIGHT);
-    CGRect content_rect = window_content_rect();
-    double page_width = content_rect.size.width;
-    double page_height = content_rect.size.height;
-    set_view_frame(root, rect(0, 0, page_width, page_height));
-
-    double panel_width = 380.0;
-    double panel_height = correct ? 400.0 : 560.0;
-    double left = (page_width - panel_width) / 2.0;
-    double top = (page_height - panel_height) / 2.0;
-    if (left < 24.0) {
-        left = 24.0;
-    }
-    if (top < 80.0) {
-        top = 80.0;
-    }
-
-    id panel = alloc_init_frame("FlippedTrideroahView", rect(left, top, panel_width, panel_height));
-    add_subview(root, panel);
-
     const char *status = correct ? "Correct" : "Incorrect";
-    id status_label = make_label(status, 0, 0, panel_width, 60, 34);
+    id status_label = make_label(status, 555, 300, 330, 52, 32);
     msg_void_id(status_label, "setTextColor:", correct ? color("systemGreenColor") : color("systemRedColor"));
     msg_void_int(status_label, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(panel, status_label);
+    add_subview(root, status_label);
 
     if (!correct) {
-        id yours = make_label("Your answer:", 60, 95, 260, 32, 20);
+        id yours = make_label("Your answer:", 610, 390, 220, 28, 18);
         msg_void_id(yours, "setTextColor:", color("whiteColor"));
         msg_void_int(yours, "setAlignment:", NSTextAlignmentCenter);
-        add_subview(panel, yours);
+        add_subview(root, yours);
 
-        id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", 50, 145, 280, 42, 20);
+        id answer_box = make_label(last_user_answer[0] ? last_user_answer : "(blank)", 600, 430, 240, 36, 18);
         msg_void_id(answer_box, "setTextColor:", rgb_color(0.65, 0.65, 0.65, 1.0));
         msg_void_int(answer_box, "setAlignment:", NSTextAlignmentCenter);
-        add_subview(panel, answer_box);
+        add_subview(root, answer_box);
 
-        id correct_title = make_label("Correct:", 90, 215, 200, 34, 20);
+        id correct_title = make_label("Correct:", 640, 482, 160, 28, 18);
         msg_void_id(correct_title, "setTextColor:", color("whiteColor"));
         msg_void_int(correct_title, "setAlignment:", NSTextAlignmentCenter);
-        add_subview(panel, correct_title);
+        add_subview(root, correct_title);
     }
 
-    id correct_answer = make_label(last_correct_answer, 10, correct ? 110 : 270, 360, 40, 24);
+    id correct_answer = make_label(last_correct_answer, 560, correct ? 410 : 526, 320, 34, 20);
     msg_void_id(correct_answer, "setTextColor:", color("systemGreenColor"));
     msg_void_int(correct_answer, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(panel, correct_answer);
+    add_subview(root, correct_answer);
 
-    const char *next_title = session_answer_count >= PRACTICE_SESSION_LIMIT ? "Finish" : "Next ->";
-    id next_button = make_large_button_sized(next_title, self, selector("nextPractice:"), 25, correct ? 210 : 350, 330);
+    const char *next_title = current_mode == PRACTICE_DAILY &&
+        session_answer_count >= DAILY_SESSION_LIMIT ? "Finish" : "Next ->";
+    id next_button = make_button_sized(next_title, self, selector("nextPractice:"), 602, correct ? 500 : 590, 236);
     style_button_color(next_button, 0.0, 1.0, 0.0);
     style_button_text(next_button, color("blackColor"));
-    add_subview(panel, next_button);
+    add_subview(root, next_button);
 
-    id exit_button = make_large_button_sized("Exit", self, selector("endPractice:"), 25, correct ? 310 : 455, 330);
+    id exit_button = make_button_sized("Exit", self, selector("endPractice:"), 602, correct ? 570 : 660, 236);
     style_button_color(exit_button, 0.05, 0.2, 1.0);
     style_button_text(exit_button, color("whiteColor"));
-    add_subview(panel, exit_button);
-    show_focus_page(root);
+    add_subview(root, exit_button);
+    show_page(root);
 }
 
 static void render_finished_screen(id self) {
     id root = make_page(APP_HEIGHT);
-    CGRect content_rect = window_content_rect();
-    double page_width = content_rect.size.width;
-    double page_height = content_rect.size.height;
-    set_view_frame(root, rect(0, 0, page_width, page_height));
-
-    double left = (page_width - 440.0) / 2.0;
-    double top = (page_height - 400.0) / 2.0;
-    if (left < 24.0) {
-        left = 24.0;
-    }
-    if (top < 80.0) {
-        top = 80.0;
-    }
-
-    id panel = alloc_init_frame("FlippedTrideroahView", rect(left, top, 440, 400));
-    add_subview(root, panel);
-
-    id label = make_label("Good Job!\nSee you\nnext time!", 0, 0, 440, 170, 34);
+    id label = make_label("Good Job!\nSee you\nnext time!", 540, 250, 360, 150, 32);
     msg_void_id(label, "setTextColor:", color("systemGreenColor"));
     msg_void_int(label, "setAlignment:", NSTextAlignmentCenter);
-    add_subview(panel, label);
+    add_subview(root, label);
 
-    id home_button = make_large_button_sized("Go home", self, selector("showHome:"), 40, 260, 360);
+    id home_button = make_button_sized("Go home", self, selector("showHome:"), 600, 500, 240);
     style_button_color(home_button, 0.0, 1.0, 0.0);
     style_button_text(home_button, color("blackColor"));
-    add_subview(panel, home_button);
-    show_focus_page(root);
+    add_subview(root, home_button);
+    show_page(root);
 }
 
 static void next_practice(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
-    if (session_answer_count >= PRACTICE_SESSION_LIMIT) {
+    if (current_mode == PRACTICE_DAILY && session_answer_count >= DAILY_SESSION_LIMIT) {
         current_mode = PRACTICE_NONE;
         awaiting_answer = 0;
         save_stats();
@@ -997,47 +1255,13 @@ static void check_practice(id self, SEL _cmd, id sender) {
     }
     snprintf(last_user_answer, sizeof(last_user_answer), "%s", answer);
 
-    char message[192];
     int correct = 0;
-
-    if (current_mode == PRACTICE_WORDS) {
-        char normalized[128];
-        size_t answer_len = strlen(answer);
-        if (answer_len >= sizeof(normalized)) {
-            answer_len = sizeof(normalized) - 1;
-        }
-        for (size_t i = 0; i < answer_len; i++) {
-            normalized[i] = (char)tolower((unsigned char)answer[i]);
-        }
-        normalized[answer_len] = '\0';
-        correct = strcmp(normalized, current_word) == 0;
-        snprintf(
-            message,
-            sizeof(message),
-            "%s: %s = %s",
-            correct ? "Correct" : "Answer",
-            current_word,
-            current_word_token
-        );
-        snprintf(last_correct_answer, sizeof(last_correct_answer), "%s", current_word);
-    } else {
-        char expected = letter_map[current_index].letter[0];
-        char actual = (char)tolower((unsigned char)answer[0]);
-        correct = actual == expected;
-        snprintf(
-            message,
-            sizeof(message),
-            "%s: %c = %s",
-            correct ? "Correct" : "Answer",
-            (char)toupper((unsigned char)expected),
-            letter_map[current_index].token
-        );
-        snprintf(last_correct_answer, sizeof(last_correct_answer), "%c", (char)toupper((unsigned char)expected));
-    }
+    correct = answer_is_correct(answer);
+    current_correct_display(last_correct_answer, sizeof(last_correct_answer));
 
     if (awaiting_answer) {
         double reaction = now_seconds() - question_started_at;
-        if (current_mode == PRACTICE_WORDS) {
+        if (current_question_is_word()) {
             words_practiced++;
             store_word_result(reaction, current_word, suitable_seconds_for_word(current_word), !correct);
         } else {
@@ -1052,13 +1276,13 @@ static void check_practice(id self, SEL _cmd, id sender) {
                 !correct
             );
         }
+        record_daily_progress(correct);
         awaiting_answer = 0;
         session_answer_count++;
         save_stats();
     }
 
     last_answer_correct = correct;
-    (void)message;
     render_result_screen(self, correct);
 }
 
@@ -1070,20 +1294,11 @@ static void dont_know(id self, SEL _cmd, id sender) {
     }
     snprintf(last_user_answer, sizeof(last_user_answer), "Don't know");
 
-    if (current_mode == PRACTICE_WORDS) {
-        snprintf(last_correct_answer, sizeof(last_correct_answer), "%s", current_word);
-    } else {
-        snprintf(
-            last_correct_answer,
-            sizeof(last_correct_answer),
-            "%c",
-            (char)toupper((unsigned char)letter_map[current_index].letter[0])
-        );
-    }
+    current_correct_display(last_correct_answer, sizeof(last_correct_answer));
 
     if (awaiting_answer) {
         double reaction = now_seconds() - question_started_at;
-        if (current_mode == PRACTICE_WORDS) {
+        if (current_question_is_word()) {
             words_practiced++;
             store_word_result(reaction, current_word, suitable_seconds_for_word(current_word), 1);
         } else {
@@ -1098,6 +1313,7 @@ static void dont_know(id self, SEL _cmd, id sender) {
                 1
             );
         }
+        record_daily_progress(0);
         awaiting_answer = 0;
         session_answer_count++;
         save_stats();
@@ -1122,21 +1338,13 @@ static void add_alphabet_grid(id root, double start_y) {
 
 static void render_home(id self) {
     id root = make_page(820);
-    CGRect content_rect = window_content_rect();
-    double page_width = content_rect.size.width;
-    set_view_frame(root, rect(0, 0, page_width, 820));
     add_header(root, self, 0);
 
-    double card_width = 430.0;
-    double card_height = 164.0;
-    double card_gap = 36.0;
-    double content_left = 24.0;
-
-    id heading = make_label("Home", content_left, 154, 300, 28, 20);
+    id heading = make_label("Home", 24, 154, 300, 28, 20);
     msg_void_id(heading, "setTextColor:", color("whiteColor"));
     add_subview(root, heading);
 
-    id letter_card = alloc_init_frame("FlippedTrideroahView", rect(content_left, 198, card_width, card_height));
+    id letter_card = alloc_init_frame("FlippedTrideroahView", rect(24, 198, 430, 164));
     style_card(letter_card);
     add_subview(root, letter_card);
     id letter_title = make_label("Practice letters", 18, 16, 240, 26, 18);
@@ -1150,7 +1358,7 @@ static void render_home(id self) {
     style_button_text(letter_button, color("whiteColor"));
     add_subview(letter_card, letter_button);
 
-    id word_card = alloc_init_frame("FlippedTrideroahView", rect(content_left + card_width + card_gap, 198, card_width, card_height));
+    id word_card = alloc_init_frame("FlippedTrideroahView", rect(490, 198, 430, 164));
     style_card(word_card);
     add_subview(root, word_card);
     id word_title = make_label("Practice words", 18, 16, 240, 26, 18);
@@ -1159,14 +1367,10 @@ static void render_home(id self) {
     id word_desc = make_label("Read a Trideroah word token and type the English word.", 18, 48, 340, 44, 14);
     msg_void_id(word_desc, "setTextColor:", color("secondaryLabelColor"));
     add_subview(word_card, word_desc);
-
-    double button_left = 18.0;
-    double button_gap = 10.0;
-    double button_width = (card_width - (button_left * 2.0) - (button_gap * 3.0)) / 4.0;
-    id any_button = make_button_sized("Any", self, selector("startWordsAny:"), button_left, 106, button_width);
-    id short_button = make_button_sized("Short", self, selector("startWordsShort:"), button_left + (button_width + button_gap), 106, button_width);
-    id medium_button = make_button_sized("Medium", self, selector("startWordsMedium:"), button_left + ((button_width + button_gap) * 2.0), 106, button_width);
-    id long_button = make_button_sized("Long", self, selector("startWordsLong:"), button_left + ((button_width + button_gap) * 3.0), 106, button_width);
+    id any_button = make_button_sized("Any", self, selector("startWordsAny:"), 18, 106, 78);
+    id short_button = make_button_sized("Short", self, selector("startWordsShort:"), 106, 106, 86);
+    id medium_button = make_button_sized("Medium", self, selector("startWordsMedium:"), 202, 106, 98);
+    id long_button = make_button_sized("Long", self, selector("startWordsLong:"), 310, 106, 84);
     style_button_color(any_button, 0.05, 0.2, 1.0);
     style_button_color(short_button, 0.05, 0.2, 1.0);
     style_button_color(medium_button, 0.05, 0.2, 1.0);
@@ -1179,6 +1383,20 @@ static void render_home(id self) {
     add_subview(word_card, short_button);
     add_subview(word_card, medium_button);
     add_subview(word_card, long_button);
+
+    id daily_card = alloc_init_frame("FlippedTrideroahView", rect(24, 398, 430, 164));
+    style_card(daily_card);
+    add_subview(root, daily_card);
+    id daily_title = make_label("Daily practice", 18, 16, 240, 26, 18);
+    msg_void_id(daily_title, "setTextColor:", color("whiteColor"));
+    add_subview(daily_card, daily_title);
+    id daily_desc = make_label("A 15-question lesson that grows with your progress.", 18, 48, 360, 44, 14);
+    msg_void_id(daily_desc, "setTextColor:", color("secondaryLabelColor"));
+    add_subview(daily_card, daily_desc);
+    id daily_button = make_button_sized("Go", self, selector("startDaily:"), 260, 96, 140);
+    style_button_color(daily_button, 0.05, 0.2, 1.0);
+    style_button_text(daily_button, color("whiteColor"));
+    add_subview(daily_card, daily_button);
 
     show_page(root);
 }
@@ -1462,7 +1680,6 @@ static void add_graph(
     double graph_width = graph_width_for_count(count);
     id graph = alloc_init_frame(graph_class, rect(0, 0, graph_width, 300));
     msg_void_id(graph_scroll, "setDocumentView:", graph);
-    scroll_view_to_right(graph_scroll, graph_width, 760.0);
 
     double display_threshold = graph_kind == 1 ? LETTER_SUITABLE_SECONDS : 1.0;
     double max_time = display_threshold;
@@ -1533,6 +1750,7 @@ static void render_stats(id self) {
 static void show_home(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
+    load_stats();
     render_home(self);
 }
 
@@ -1548,6 +1766,27 @@ static void show_stats(id self, SEL _cmd, id sender) {
     render_stats(self);
 }
 
+static void glyph_key_pressed(id self, SEL _cmd, id sender) {
+    (void)self;
+    (void)_cmd;
+    long tag = ((long (*)(id, SEL))objc_msgSend)(sender, selector("tag"));
+    if (tag < 0 || tag >= 26) {
+        return;
+    }
+
+    glyph_selected_index = (int)tag;
+    char answer[8];
+    snprintf(
+        answer,
+        sizeof(answer),
+        "%c",
+        (char)toupper((unsigned char)letter_map[glyph_selected_index].letter[0])
+    );
+    if (practice_answer) {
+        set_string(practice_answer, answer);
+    }
+}
+
 static void start_letters(id self, SEL _cmd, id sender) {
     (void)_cmd;
     (void)sender;
@@ -1561,6 +1800,15 @@ static void start_words_with_length(id self, int min_length, int max_length) {
     word_length_max = max_length;
     current_mode = PRACTICE_WORDS;
     session_answer_count = 0;
+    render_practice_screen(self);
+}
+
+static void start_daily(id self, SEL _cmd, id sender) {
+    (void)_cmd;
+    (void)sender;
+    current_mode = PRACTICE_DAILY;
+    session_answer_count = 0;
+    prepare_daily_session();
     render_practice_screen(self);
 }
 
@@ -1614,13 +1862,11 @@ static void build_window(id self) {
         NO_VALUE
     );
     msg_void_id(window_ref, "setTitle:", ns_string("Learn Trideroah"));
-    msg_void_int(window_ref, "setCollectionBehavior:", NSWindowCollectionBehaviorFullScreenPrimary);
     msg_void(window_ref, "center");
 
     scroll_ref = alloc_init_frame("NSScrollView", rect(0, 0, APP_WIDTH, APP_HEIGHT));
     msg_void_int(scroll_ref, "setAutoresizingMask:", NSViewWidthSizable | NSViewHeightSizable);
     msg_void_bool(scroll_ref, "setHasVerticalScroller:", YES_VALUE);
-    msg_void_bool(scroll_ref, "setHasHorizontalScroller:", NO_VALUE);
     msg_void_bool(scroll_ref, "setDrawsBackground:", NO_VALUE);
     msg_void_id(window_ref, "setContentView:", scroll_ref);
 
@@ -1643,7 +1889,6 @@ static BOOL should_terminate_after_last_window_closed(id self, SEL _cmd, id send
     (void)self;
     (void)_cmd;
     (void)sender;
-    save_stats();
     return YES_VALUE;
 }
 
@@ -1692,10 +1937,12 @@ static Class make_delegate_class(void) {
         );
         class_addMethod(delegate_class, selector("checkPractice:"), (IMP)check_practice, "v@:@");
         class_addMethod(delegate_class, selector("dontKnow:"), (IMP)dont_know, "v@:@");
+        class_addMethod(delegate_class, selector("glyphKeyPressed:"), (IMP)glyph_key_pressed, "v@:@");
         class_addMethod(delegate_class, selector("nextPractice:"), (IMP)next_practice, "v@:@");
         class_addMethod(delegate_class, selector("showHome:"), (IMP)show_home, "v@:@");
         class_addMethod(delegate_class, selector("showLetters:"), (IMP)show_letters, "v@:@");
         class_addMethod(delegate_class, selector("showStats:"), (IMP)show_stats, "v@:@");
+        class_addMethod(delegate_class, selector("startDaily:"), (IMP)start_daily, "v@:@");
         class_addMethod(delegate_class, selector("startLetters:"), (IMP)start_letters, "v@:@");
         class_addMethod(delegate_class, selector("startWordsAny:"), (IMP)start_words_any, "v@:@");
         class_addMethod(delegate_class, selector("startWordsShort:"), (IMP)start_words_short, "v@:@");
@@ -1709,7 +1956,6 @@ static Class make_delegate_class(void) {
 
 static void launch_learn_app(void) {
     srand((unsigned int)time(NULL));
-    load_stats();
     make_flipped_view_class();
     make_graph_view_classes();
     Class delegate_class = make_delegate_class();
