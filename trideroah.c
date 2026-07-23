@@ -41,7 +41,7 @@ enum {
     NSBackingStoreBuffered = 2,
     NSApplicationActivationPolicyRegular = 0,
     NSImageScaleProportionallyUpOrDown = 3,
-    NSTextAlignmentCenter = 2,
+    NSTextAlignmentCenter = 1,
     NSFocusRingTypeDefault = 0,
     NSViewWidthSizable = 1 << 1,
     NSViewHeightSizable = 1 << 4
